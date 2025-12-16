@@ -2,29 +2,32 @@ trigger:
 - main
 
 pool:
-  vmImage: Default
+  name: Default   # Use your self-hosted agent pool
 
 stages:
 - stage: Build
   displayName: "Build Stage"
   jobs:
   - job: BuildJob
+    displayName: "Build DLT Artifact"
     pool:
-      vmImage: 'ubuntu-latest'
+      name: Default                  # Your self-hosted agent pool
+      demands:
+        - agent.name -equals RSMAS-Agent
     steps:
-    # Use Python
-    - task: UsePythonVersion@0
-      inputs:
-        versionSpec: '3.x'
+      # 1️⃣ Use Python
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.x'
 
-    # Install dependencies & lint/test
-    - script: |
-        pip install -r requirements.txt
-        echo "✅ Dependencies installed"
-        # Optional: run tests here
-      displayName: "Install dependencies & test"
+      # 2️⃣ Install dependencies & optional lint/test
+      - script: |
+          pip install -r requirements.txt
+          echo "✅ Dependencies installed"
+          # Optional: run tests here
+        displayName: "Install dependencies & test"
 
-    # Publish artifact for release pipeline
-    - publish: .
-      artifact: DLT_Artifact
-      displayName: "Publish Artifact"
+      # 3️⃣ Publish artifact for release pipeline
+      - publish: .
+        artifact: DLT_Artifact
+        displayName: "Publish DLT Artifact"
