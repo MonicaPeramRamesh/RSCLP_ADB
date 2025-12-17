@@ -63,7 +63,7 @@ stages:
         for PIPELINE_FILE in ./pipelines/*.json; do
           echo "Updating pipeline JSON: $PIPELINE_FILE"
           python ./scripts/update_pipeline_json.py \
-            --file $PIPELINE_FILE \
+            --file "$PIPELINE_FILE" \
             --catalog $(DLT_CATALOG) \
             --schema $(DLT_SCHEMA) \
             --secret_scope $(DLT_SECRET_SCOPE)
@@ -93,6 +93,7 @@ stages:
 
         done
       displayName: "Deploy all DLT Pipelines"
+      shell: bash
 
     # 2️⃣ Loop through all notebooks in repo
     - script: |
@@ -117,3 +118,4 @@ stages:
             https://$(DATABRICKS_HOST)/api/2.0/workspace/import
         done
       displayName: "Deploy all Notebooks"
+      shell: bash
