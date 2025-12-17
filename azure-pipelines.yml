@@ -24,7 +24,6 @@ stages:
 
     # 2️⃣ Install dependencies
     - script: |
-        pip install -r requirements.txt
         echo "✅ Dependencies installed"
       displayName: "Install dependencies"
 
