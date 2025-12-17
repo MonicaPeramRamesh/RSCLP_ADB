@@ -7,7 +7,7 @@ pool:
     - agent.name -equals RSMAS-Agent
 
 variables:
-- group: DLT_Variables  # Databricks credentials & target catalog/schema
+- group: test-dlt-vars  # Databricks credentials & target catalog/schema
 
 stages:
 
