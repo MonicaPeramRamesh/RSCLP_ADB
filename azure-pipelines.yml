@@ -68,13 +68,29 @@ stages:
             --schema $(DLT_SCHEMA) \
             --secret_scope $(DLT_SECRET_SCOPE)
 
-          echo "Deploying pipeline to Databricks: $PIPELINE_FILE"
-          PIPELINE_JSON=$(cat $PIPELINE_FILE)
-          curl -s -X POST \
+          PIPELINE_JSON=$(jq -c . "$PIPELINE_FILE")
+          PIPELINE_NAME=$(jq -r .name "$PIPELINE_FILE")
+
+          # Try to create the pipeline
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
             -H "Content-Type: application/json" \
             -d "$PIPELINE_JSON" \
-            https://$(DATABRICKS_HOST)/api/2.0/pipelines
+            https://$(DATABRICKS_HOST)/api/2.0/pipelines)
+
+          if [ "$RESPONSE" == "409" ]; then
+            echo "Pipeline '$PIPELINE_NAME' exists, updating..."
+            PIPELINE_ID=$(curl -s -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
+              https://$(DATABRICKS_HOST)/api/2.0/pipelines | \
+              jq -r --arg NAME "$PIPELINE_NAME" '.pipelines[] | select(.name==$NAME) | .pipeline_id')
+
+            curl -s -X PATCH \
+              -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
+              -H "Content-Type: application/json" \
+              -d "$PIPELINE_JSON" \
+              https://$(DATABRICKS_HOST)/api/2.0/pipelines/$PIPELINE_ID
+          fi
+
         done
       displayName: "Deploy all DLT Pipelines"
 
@@ -86,7 +102,8 @@ stages:
           TARGET_PATH="/Repos/RSMAS_ADB/dlt/$REL_PATH"
           echo "Deploying $NOTEBOOK -> $TARGET_PATH"
 
-          CONTENT=$(base64 -w 0 $NOTEBOOK)
+          # Base64 encode safely
+          CONTENT=$(base64 -w 0 "$NOTEBOOK" || base64 "$NOTEBOOK" | tr -d '\n')
 
           curl -s -X POST \
             -H "Authorization: Bearer $(DATABRICKS_TOKEN)" \
@@ -100,5 +117,3 @@ stages:
             https://$(DATABRICKS_HOST)/api/2.0/workspace/import
         done
       displayName: "Deploy all Notebooks"
-
-so this will give resukt as i can see the dlt pipeline in my test env?
