@@ -37,7 +37,7 @@ stages:
           $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath
           Write-Host "✅ Updated: $catalog.$schema"
 
-    # 2. Create Pipeline (✅ NO $host variable!)
+    # 2. CORRECT API WITH /workspace/
     - task: PowerShell@2
       displayName: '🚀 Create Pipeline'
       inputs:
@@ -47,13 +47,13 @@ stages:
           $dbToken = "$(DATABRICKS_TOKEN)"
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
           
+          # ✅ CORRECT: /workspace/api/2.1/pipelines
+          $apiUrl = "$dbHost/workspace/api/2.1/pipelines"
+          
           $headers = @{
             'Authorization' = "Bearer $dbToken"
             'Content-Type' = 'application/json'
           }
-          
-          # Direct URL - NO variables!
-          $apiUrl = "$dbHost/api/2.1/pipelines"
           
           # Delete existing
           try {
@@ -61,15 +61,16 @@ stages:
             $pipelineName = (Get-Content $jsonPath | ConvertFrom-Json).name
             $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
             if ($existing) {
-              Invoke-RestMethod -Uri "$apiUrl/$($existing.id)" -Method Delete -Headers $headers
+              $deleteUrl = "$dbHost/workspace/api/2.1/pipelines/$($existing.id)"
+              Invoke-RestMethod -Uri $deleteUrl -Method Delete -Headers $headers
               Write-Host "🗑️ Deleted: $($existing.id)"
-              Start-Sleep 2
+              Start-Sleep 3
             }
           } catch { Write-Host "ℹ️ No existing pipeline" }
           
-          # Create
+          # Create pipeline
           $body = Get-Content $jsonPath -Raw
-          $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body $body
+          $response = Invoke-RestMethod -Uri $apiUrl -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
           
           Write-Host "✅ Pipeline ID: $($response.id)"
           Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
@@ -90,9 +91,9 @@ stages:
             $relPath = "transformations/$($_.Name)"
             $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
             $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
-            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json
+            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json -Depth 3
             
-            Invoke-RestMethod -Uri $wsUrl -Method Post -Headers $headers -Body $body -ContentType "application/json"
+            Invoke-RestMethod -Uri $wsUrl -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
             Write-Host "✅ $relPath"
           }
 
@@ -104,5 +105,5 @@ stages:
         script: |
           $dbHost = "$(DATABRICKS_HOST)"
           $id = "$(PipelineId)"
-          Write-Host "🚀 DEPLOYED!"
+          Write-Host "🚀 DEPLOYED SUCCESSFULLY!"
           Write-Host "$dbHost#pipeline/$id"
