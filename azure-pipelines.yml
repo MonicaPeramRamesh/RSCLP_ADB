@@ -41,7 +41,7 @@ stages:
                 $src = "$(Build.SourcesDirectory)"
                 
                 # Find all pipelines
-                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where {$_.Directory.Name -eq "pipelines"}
+                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where-Object {$_.Directory.Name -eq "pipelines"}
                 Write-Host "Found $($pipes.Count) pipeline(s)"
                 
                 # Deploy each pipeline
@@ -53,7 +53,7 @@ stages:
                   $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
                   
                   # Create dirs
-                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach {
+                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach-Object {
                     Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$_}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
                   }
                   
@@ -65,7 +65,7 @@ stages:
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.catalog' -NotePropertyValue "$(DLT_CATALOG)" -Force
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.schema' -NotePropertyValue "$(DLT_SCHEMA)" -Force
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.secret.scope' -NotePropertyValue "$(DLT_SECRET_SCOPE)" -Force
-                  if ($cfg.libraries) { $cfg.libraries | ForEach { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
+                  if ($cfg.libraries) { $cfg.libraries | ForEach-Object { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
                   
                   $tmp = "$env:TEMP\$name.json"
                   $cfg | ConvertTo-Json -Depth 10 | Set-Content $tmp
@@ -73,7 +73,7 @@ stages:
                   # Upload transformations
                   $trans = Join-Path $folder.FullName "transformations"
                   if (Test-Path $trans) {
-                    Get-ChildItem $trans -Filter *.py -Recurse | ForEach {
+                    Get-ChildItem $trans -File -Filter *.py -Recurse | ForEach-Object {
                       $tgt = "$base/transformations/$($_.Name)"
                       $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
                       Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language="PYTHON";overwrite=$true;format="SOURCE"}|ConvertTo-Json) | Out-Null
@@ -84,7 +84,7 @@ stages:
                   # Upload utilities
                   $util = Join-Path $folder.FullName "utilities"
                   if (Test-Path $util) {
-                    Get-ChildItem $util -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    Get-ChildItem $util -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                       $tgt = "$base/utilities/$($_.Name)"
                       $fmt = "SOURCE"; $lang = "PYTHON"
                       if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
@@ -98,7 +98,7 @@ stages:
                   # Upload notebooks (inside pipeline folder)
                   $nb = Join-Path $folder.FullName "notebooks"
                   if (Test-Path $nb) {
-                    Get-ChildItem $nb -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    Get-ChildItem $nb -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                       $tgt = "$base/notebooks/$($_.Name)"
                       $fmt = "SOURCE"; $lang = "PYTHON"
                       if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
@@ -111,7 +111,7 @@ stages:
                   
                   # Create/update pipeline
                   $list = Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Get
-                  $existing = $list.statuses | Where {$_.name -eq $name} | Select -First 1
+                  $existing = $list.statuses | Where-Object {$_.name -eq $name} | Select-Object -First 1
                   if ($existing) {
                     Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existing.pipeline_id)" -Headers $headers -Method Put -Body (Get-Content $tmp -Raw) | Out-Null
                     Write-Host "  ✅ Updated pipeline"
@@ -122,10 +122,14 @@ stages:
                 }
                 
                 # Find standalone notebooks (outside pipeline folders)
-                $pipelinePaths = $pipes | ForEach { $_.Directory.Parent.FullName }
-                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where {
+                $pipelinePaths = @()
+                if ($pipes) {
+                  $pipelinePaths = $pipes | ForEach-Object { $_.Directory.Parent.FullName }
+                }
+                
+                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where-Object {
                   $_.Name -in @("notebooks","explorations","analysis") -and
-                  -not ($pipelinePaths | Where { $_.FullName.StartsWith($_) })
+                  -not ($pipelinePaths -contains $_.Parent.FullName)
                 }
                 
                 Write-Host "`nFound $($nbFolders.Count) standalone notebook folder(s)"
@@ -139,7 +143,7 @@ stages:
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
                   
                   # Upload notebooks
-                  Get-ChildItem $nbf.FullName -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                  Get-ChildItem $nbf.FullName -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                     $tgt = "$base/$($_.Name)"
                     $fmt = "SOURCE"; $lang = "PYTHON"
                     if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
@@ -205,7 +209,7 @@ stages:
                 $src = "$(Build.SourcesDirectory)"
                 
                 # Find all pipelines
-                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where {$_.Directory.Name -eq "pipelines"}
+                $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where-Object {$_.Directory.Name -eq "pipelines"}
                 Write-Host "Found $($pipes.Count) pipeline(s)"
                 
                 # Deploy each pipeline
@@ -217,7 +221,7 @@ stages:
                   $base = "/Workspace/Shared/DLT_Pipelines/$($folder.Name)/$name"
                   
                   # Create dirs
-                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach {
+                  @($base, "$base/transformations", "$base/utilities", "$base/notebooks") | ForEach-Object {
                     Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$_}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
                   }
                   
@@ -229,7 +233,7 @@ stages:
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.catalog' -NotePropertyValue "$(DLT_CATALOG)" -Force
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.schema' -NotePropertyValue "$(DLT_SCHEMA)" -Force
                   $cfg.configuration | Add-Member -NotePropertyName 'rsmas.secret.scope' -NotePropertyValue "$(DLT_SECRET_SCOPE)" -Force
-                  if ($cfg.libraries) { $cfg.libraries | ForEach { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
+                  if ($cfg.libraries) { $cfg.libraries | ForEach-Object { if ($_.glob) { $_.glob.include = "$base/transformations/**" }}}
                   
                   $tmp = "$env:TEMP\$name.json"
                   $cfg | ConvertTo-Json -Depth 10 | Set-Content $tmp
@@ -237,7 +241,7 @@ stages:
                   # Upload transformations
                   $trans = Join-Path $folder.FullName "transformations"
                   if (Test-Path $trans) {
-                    Get-ChildItem $trans -Filter *.py -Recurse | ForEach {
+                    Get-ChildItem $trans -File -Filter *.py -Recurse | ForEach-Object {
                       $tgt = "$base/transformations/$($_.Name)"
                       $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
                       Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/import" -Headers $headers -Method Post -Body (@{path=$tgt;content=$b64;language="PYTHON";overwrite=$true;format="SOURCE"}|ConvertTo-Json) | Out-Null
@@ -248,7 +252,7 @@ stages:
                   # Upload utilities
                   $util = Join-Path $folder.FullName "utilities"
                   if (Test-Path $util) {
-                    Get-ChildItem $util -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    Get-ChildItem $util -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                       $tgt = "$base/utilities/$($_.Name)"
                       $fmt = "SOURCE"; $lang = "PYTHON"
                       if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
@@ -262,7 +266,7 @@ stages:
                   # Upload notebooks (inside pipeline folder)
                   $nb = Join-Path $folder.FullName "notebooks"
                   if (Test-Path $nb) {
-                    Get-ChildItem $nb -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                    Get-ChildItem $nb -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                       $tgt = "$base/notebooks/$($_.Name)"
                       $fmt = "SOURCE"; $lang = "PYTHON"
                       if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
@@ -275,7 +279,7 @@ stages:
                   
                   # Create/update pipeline
                   $list = Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines" -Headers $headers -Method Get
-                  $existing = $list.statuses | Where {$_.name -eq $name} | Select -First 1
+                  $existing = $list.statuses | Where-Object {$_.name -eq $name} | Select-Object -First 1
                   if ($existing) {
                     Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existing.pipeline_id)" -Headers $headers -Method Put -Body (Get-Content $tmp -Raw) | Out-Null
                     Write-Host "  ✅ Updated pipeline"
@@ -286,10 +290,14 @@ stages:
                 }
                 
                 # Find standalone notebooks (outside pipeline folders)
-                $pipelinePaths = $pipes | ForEach { $_.Directory.Parent.FullName }
-                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where {
+                $pipelinePaths = @()
+                if ($pipes) {
+                  $pipelinePaths = $pipes | ForEach-Object { $_.Directory.Parent.FullName }
+                }
+                
+                $nbFolders = Get-ChildItem $src -Directory -Recurse | Where-Object {
                   $_.Name -in @("notebooks","explorations","analysis") -and
-                  -not ($pipelinePaths | Where { $_.FullName.StartsWith($_) })
+                  -not ($pipelinePaths -contains $_.Parent.FullName)
                 }
                 
                 Write-Host "`nFound $($nbFolders.Count) standalone notebook folder(s)"
@@ -303,7 +311,7 @@ stages:
                   Invoke-RestMethod "$(DATABRICKS_HOST)/api/2.0/workspace/mkdirs" -Headers $headers -Method Post -Body (@{path=$base}|ConvertTo-Json) -ErrorAction SilentlyContinue | Out-Null
                   
                   # Upload notebooks
-                  Get-ChildItem $nbf.FullName -Include *.ipynb,*.py,*.sql -Recurse | ForEach {
+                  Get-ChildItem $nbf.FullName -File -Recurse | Where-Object {$_.Extension -in @(".ipynb",".py",".sql")} | ForEach-Object {
                     $tgt = "$base/$($_.Name)"
                     $fmt = "SOURCE"; $lang = "PYTHON"
                     if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
