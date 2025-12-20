@@ -1,58 +1,319 @@
 trigger:
-  - main
+  branches:
+    include:
+      - main
+      - develop
 
 pool:
   name: Default
+  demands:
+    - agent.name -equals RSMAS-Agent
 
 variables:
-- group: test-dlt-vars
+  - group: test-dlt-vars  # Change to 'dev-dlt-vars' for dev deployment
+  - name: REPOS_BASE_PATH
+    value: '/Repos/RSMAS_ADB/dlt'
+  - name: ROOT_FOLDER
+    value: '.'  # Root folder containing all pipeline folders
 
 stages:
-- stage: Deploy
-  displayName: 'Deploy DLT to Test'
-  jobs:
-  - job: DeployDLT
-    steps:
-    - checkout: self
-      clean: true
+  - stage: Deploy_All_Pipelines
+    displayName: 'Deploy All DLT Pipelines'
+    jobs:
+      - job: DeployJob
+        displayName: 'Auto-Detect and Deploy All Pipelines'
+        steps:
+          # Step 1: Install Databricks CLI
+          - task: PowerShell@2
+            displayName: 'Install Databricks CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "=============================================="
+                Write-Host "Installing Databricks CLI..."
+                Write-Host "=============================================="
+                
+                pip install databricks-cli --upgrade --quiet
+                
+                # Verify installation
+                $version = databricks --version
+                Write-Host "✅ Databricks CLI installed: $version"
+              errorActionPreference: 'stop'
 
-    # 1. Update JSON with YOUR Python script
-    - task: PowerShell@2
-      displayName: '🔧 Update JSON'
-      inputs:
-        targetType: 'inline'
-        script: |
-          $scriptPath = "$(Build.SourcesDirectory)/Product Master/scripts/update_pipeline_json.py"
-          $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          
-          python $scriptPath --file $jsonPath --catalog "$(DLT_CATALOG)" --schema "$(DLT_SCHEMA)" --secret_scope "$(DLT_SECRET_SCOPE)"
-          Write-Host "✅ JSON updated to TEST environment"
+          # Step 2: Configure Databricks Authentication
+          - task: PowerShell@2
+            displayName: 'Configure Databricks Authentication'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "=============================================="
+                Write-Host "Configuring Databricks Authentication..."
+                Write-Host "=============================================="
+                
+                # Set environment variables
+                $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                
+                # Create config file
+                $configPath = "$env:USERPROFILE\.databrickscfg"
+                $configContent = @"
+                [DEFAULT]
+                host = $(DATABRICKS_HOST)
+                token = $(DATABRICKS_TOKEN)
+                "@
+                
+                $configContent | Out-File -FilePath $configPath -Encoding ASCII -Force
+                
+                Write-Host "✅ Configuration file created at: $configPath"
+                Write-Host "Host: $(DATABRICKS_HOST)"
+                
+                # Test connection
+                Write-Host "`nTesting Databricks connection..."
+                databricks workspace list / | Out-Null
+                Write-Host "✅ Connection successful!"
+              errorActionPreference: 'stop'
 
-    # 2. Create workspace folders (if needed)
-    - task: PowerShell@2
-      displayName: '📁 Create Structure'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "✅ Structure ready:"
-          Write-Host "📂 /Repos/RSMAS_ADB/dlt/product_master/transformations/"
-          Write-Host "📄 /Repos/RSMAS_ADB/dlt/product_master/pipelines/product_master.json"
+          # Step 3: Discover All Pipelines
+          - task: PowerShell@2
+            displayName: 'Discover All DLT Pipelines'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "=============================================="
+                Write-Host "Discovering DLT Pipelines..."
+                Write-Host "=============================================="
+                
+                $sourceDir = "$(Build.SourcesDirectory)"
+                Write-Host "Scanning directory: $sourceDir"
+                
+                # Find all pipeline JSON files
+                $pipelineFiles = Get-ChildItem -Path $sourceDir -Filter "*.json" -Recurse | 
+                                 Where-Object { $_.Directory.Name -eq "pipelines" }
+                
+                if ($pipelineFiles.Count -eq 0) {
+                  Write-Host "❌ No pipeline JSON files found!"
+                  exit 1
+                }
+                
+                Write-Host "`n✅ Found $($pipelineFiles.Count) pipeline(s):"
+                $pipelineFiles | ForEach-Object { Write-Host "  - $($_.FullName)" }
+                
+                # Save pipeline info for next steps
+                $pipelineInfo = @()
+                foreach ($file in $pipelineFiles) {
+                  $pipelineName = $file.BaseName
+                  $pipelineFolder = $file.Directory.Parent.FullName
+                  
+                  $info = @{
+                    Name = $pipelineName
+                    JsonPath = $file.FullName
+                    FolderPath = $pipelineFolder
+                    TransformationsPath = Join-Path $pipelineFolder "transformations"
+                    UtilitiesPath = Join-Path $pipelineFolder "utilities"
+                  }
+                  $pipelineInfo += $info
+                }
+                
+                # Save to file for next steps
+                $pipelineInfo | ConvertTo-Json -Depth 5 | Out-File "$(Agent.TempDirectory)\pipelines.json"
+                Write-Host "`n✅ Pipeline discovery complete"
+              errorActionPreference: 'stop'
 
-    # 3. SUCCESS - Manual pipeline creation (5 seconds)
-    - task: PowerShell@2
-      displayName: '🎉 FILES READY - CREATE PIPELINE'
-      inputs:
-        targetType: 'inline'
-        script: |
-          Write-Host "=================================="
-          Write-Host "✅ CI/CD SUCCESS - FILES UPDATED!"
-          Write-Host ""
-          Write-Host "📋 NEXT STEPS (5 seconds):"
-          Write-Host "1. Open: $(DATABRICKS_HOST)"
-          Write-Host "2. Workflows → New Pipeline"
-          Write-Host "3. Import JSON file:"
-          Write-Host "   /Repos/RSMAS_ADB/dlt/product_master/pipelines/product_master.json"
-          Write-Host "4. Create → DONE!"
-          Write-Host ""
-          Write-Host "🚀 Future commits auto-update files!"
-          Write-Host "=================================="
+          # Step 4: Deploy All Pipelines
+          - task: PowerShell@2
+            displayName: 'Deploy All Pipelines and Artifacts'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "=============================================="
+                Write-Host "Deploying All Pipelines..."
+                Write-Host "=============================================="
+                
+                $env:DATABRICKS_HOST = "$(DATABRICKS_HOST)"
+                $env:DATABRICKS_TOKEN = "$(DATABRICKS_TOKEN)"
+                
+                # Load pipeline info
+                $pipelines = Get-Content "$(Agent.TempDirectory)\pipelines.json" | ConvertFrom-Json
+                
+                $headers = @{
+                  "Authorization" = "Bearer $(DATABRICKS_TOKEN)"
+                  "Content-Type" = "application/json"
+                }
+                
+                foreach ($pipeline in $pipelines) {
+                  Write-Host "`n=============================================="
+                  Write-Host "Processing Pipeline: $($pipeline.Name)"
+                  Write-Host "=============================================="
+                  
+                  $pipelineName = $pipeline.Name
+                  $targetBase = "$(REPOS_BASE_PATH)/$pipelineName"
+                  
+                  # 1. Create directory structure
+                  Write-Host "`n[1/5] Creating directory structure..."
+                  $directories = @(
+                    "$targetBase",
+                    "$targetBase/transformations",
+                    "$targetBase/pipelines",
+                    "$targetBase/utilities"
+                  )
+                  
+                  foreach ($dir in $directories) {
+                    try {
+                      databricks workspace mkdirs "$dir" 2>$null
+                      Write-Host "  ✅ Created: $dir"
+                    } catch {
+                      Write-Host "  ℹ️ Already exists: $dir"
+                    }
+                  }
+                  
+                  # 2. Update pipeline JSON configuration
+                  Write-Host "`n[2/5] Updating pipeline configuration..."
+                  $config = Get-Content $pipeline.JsonPath -Raw | ConvertFrom-Json
+                  
+                  $config.catalog = "$(DLT_CATALOG)"
+                  $config.schema = "$(DLT_SCHEMA)"
+                  
+                  if (-not $config.configuration) {
+                    $config | Add-Member -MemberType NoteProperty -Name "configuration" -Value @{} -Force
+                  }
+                  
+                  $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.catalog' -Value "$(DLT_CATALOG)" -Force
+                  $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.schema' -Value "$(DLT_SCHEMA)" -Force
+                  $config.configuration | Add-Member -MemberType NoteProperty -Name 'rsmas.secret.scope' -Value "$(DLT_SECRET_SCOPE)" -Force
+                  
+                  # Update library paths to point to Repos
+                  if ($config.libraries) {
+                    foreach ($lib in $config.libraries) {
+                      if ($lib.glob -and $lib.glob.include) {
+                        $lib.glob.include = "$targetBase/transformations/**"
+                      }
+                    }
+                  }
+                  
+                  # Save updated config to temp file
+                  $tempConfigPath = "$(Agent.TempDirectory)\$pipelineName`_config.json"
+                  $config | ConvertTo-Json -Depth 10 | Set-Content $tempConfigPath
+                  
+                  Write-Host "  ✅ Configuration updated"
+                  Write-Host "    Catalog: $(DLT_CATALOG)"
+                  Write-Host "    Schema: $(DLT_SCHEMA)"
+                  Write-Host "    Secret Scope: $(DLT_SECRET_SCOPE)"
+                  
+                  # 3. Upload transformation scripts
+                  Write-Host "`n[3/5] Uploading transformation scripts..."
+                  if (Test-Path $pipeline.TransformationsPath) {
+                    $pyFiles = Get-ChildItem -Path $pipeline.TransformationsPath -Filter *.py -Recurse
+                    
+                    foreach ($file in $pyFiles) {
+                      $relativePath = $file.FullName.Substring($pipeline.TransformationsPath.Length).TrimStart('\', '/')
+                      $targetFile = "$targetBase/transformations/$($relativePath.Replace('\', '/'))"
+                      
+                      Write-Host "  Uploading: $($file.Name) -> $targetFile"
+                      databricks workspace import "$($file.FullName)" "$targetFile" --language PYTHON --overwrite
+                    }
+                    Write-Host "  ✅ Uploaded $($pyFiles.Count) transformation file(s)"
+                  } else {
+                    Write-Host "  ℹ️ No transformations folder found"
+                  }
+                  
+                  # 4. Upload utility notebooks
+                  Write-Host "`n[4/5] Uploading utility notebooks..."
+                  if (Test-Path $pipeline.UtilitiesPath) {
+                    $utilFiles = Get-ChildItem -Path $pipeline.UtilitiesPath -Include *.ipynb,*.py,*.sql -Recurse
+                    
+                    foreach ($file in $utilFiles) {
+                      $relativePath = $file.FullName.Substring($pipeline.UtilitiesPath.Length).TrimStart('\', '/')
+                      $targetFile = "$targetBase/utilities/$($relativePath.Replace('\', '/'))"
+                      
+                      $format = "SOURCE"
+                      $language = "PYTHON"
+                      if ($file.Extension -eq ".ipynb") { 
+                        $format = "JUPYTER" 
+                      } elseif ($file.Extension -eq ".sql") { 
+                        $format = "SQL"
+                        $language = "SQL"
+                      }
+                      
+                      Write-Host "  Uploading: $($file.Name) -> $targetFile"
+                      databricks workspace import "$($file.FullName)" "$targetFile" --format $format --language $language --overwrite
+                    }
+                    Write-Host "  ✅ Uploaded $($utilFiles.Count) utility file(s)"
+                  } else {
+                    Write-Host "  ℹ️ No utilities folder found"
+                  }
+                  
+                  # 5. Create or Update DLT Pipeline
+                  Write-Host "`n[5/5] Creating/Updating DLT pipeline..."
+                  
+                  try {
+                    # List existing pipelines
+                    $listUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines"
+                    $response = Invoke-RestMethod -Uri $listUrl -Headers $headers -Method Get
+                    $existingPipeline = $response.statuses | Where-Object { $_.name -eq $pipelineName } | Select-Object -First 1
+                    
+                    $configJson = Get-Content $tempConfigPath -Raw
+                    
+                    if ($existingPipeline) {
+                      Write-Host "  ℹ️ Pipeline exists (ID: $($existingPipeline.pipeline_id))"
+                      Write-Host "  Updating pipeline..."
+                      
+                      $updateUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines/$($existingPipeline.pipeline_id)"
+                      Invoke-RestMethod -Uri $updateUrl -Headers $headers -Method Put -Body $configJson | Out-Null
+                      
+                      Write-Host "  ✅ Pipeline updated successfully"
+                    } else {
+                      Write-Host "  Creating new pipeline..."
+                      
+                      $createUrl = "$(DATABRICKS_HOST)/api/2.0/pipelines"
+                      $result = Invoke-RestMethod -Uri $createUrl -Headers $headers -Method Post -Body $configJson
+                      
+                      Write-Host "  ✅ Pipeline created successfully (ID: $($result.pipeline_id))"
+                    }
+                  } catch {
+                    Write-Host "  ❌ Error deploying pipeline: $($_.Exception.Message)"
+                    if ($_.ErrorDetails.Message) {
+                      Write-Host "  Details: $($_.ErrorDetails.Message)"
+                    }
+                    throw
+                  }
+                  
+                  Write-Host "`n✅ Pipeline '$pipelineName' deployed successfully!"
+                }
+                
+                Write-Host "`n=============================================="
+                Write-Host "✅ ALL PIPELINES DEPLOYED SUCCESSFULLY"
+                Write-Host "=============================================="
+              errorActionPreference: 'stop'
+
+          # Step 5: Deployment Summary
+          - task: PowerShell@2
+            displayName: 'Deployment Summary'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host ""
+                Write-Host "=============================================="
+                Write-Host "        DEPLOYMENT SUMMARY"
+                Write-Host "=============================================="
+                
+                $pipelines = Get-Content "$(Agent.TempDirectory)\pipelines.json" | ConvertFrom-Json
+                
+                Write-Host "`nEnvironment: TEST"
+                Write-Host "Databricks Host: $(DATABRICKS_HOST)"
+                Write-Host "Target Catalog: $(DLT_CATALOG)"
+                Write-Host "Target Schema: $(DLT_SCHEMA)"
+                Write-Host "Secret Scope: $(DLT_SECRET_SCOPE)"
+                Write-Host ""
+                Write-Host "Deployed Pipelines ($($pipelines.Count)):"
+                foreach ($pipeline in $pipelines) {
+                  Write-Host "  ✅ $($pipeline.Name)"
+                  Write-Host "     Location: $(REPOS_BASE_PATH)/$($pipeline.Name)"
+                }
+                Write-Host ""
+                Write-Host "=============================================="
+                Write-Host "Next Steps:"
+                Write-Host "  1. Go to $(DATABRICKS_HOST)"
+                Write-Host "  2. Navigate to Workflows > Delta Live Tables"
+                Write-Host "  3. Find your pipeline(s) and click 'Start'"
+                Write-Host "=============================================="
+              errorActionPreference: 'continue'
