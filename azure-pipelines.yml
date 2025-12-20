@@ -2,7 +2,7 @@ trigger:
   - main
 
 pool:
-  name: Default  # Your self-hosted agent
+  name: Default
 
 variables:
 - group: test-dlt-vars
@@ -37,9 +37,9 @@ stages:
           $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -Encoding UTF8
           Write-Host "✅ Config updated!"
 
-    # 2. Create Pipeline (✅ FIXED $host issue)
+    # 2. DELETE Existing Pipeline + Create New (✅ FIXES 404)
     - task: PowerShell@2
-      displayName: '🚀 Create Pipeline'
+      displayName: '🚀 Deploy Pipeline'
       inputs:
         targetType: 'inline'
         script: |
@@ -52,17 +52,29 @@ stages:
             'Content-Type' = 'application/json'
           }
           
-          $body = Get-Content $jsonPath -Raw
-          $uri = "$databricksHost/api/2.1/pipelines"
+          $pipelineName = (Get-Content $jsonPath -Raw | ConvertFrom-Json).name
+          Write-Host "🎯 Pipeline Name: $pipelineName"
           
-          try {
-            $response = Invoke-RestMethod -Uri $uri -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
-            Write-Host "✅ Pipeline created! ID: $($response.id)"
-            Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
-          } catch {
-            Write-Error "❌ Failed: $($_.Exception.Message)"
-            exit 1
+          # Step 1: List all pipelines to find existing one
+          $listUri = "$databricksHost/api/2.1/pipelines?expand_tasks=true&limit=100"
+          $pipelines = Invoke-RestMethod -Uri $listUri -Headers $headers
+          
+          # Step 2: Delete existing pipeline (if exists)
+          $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
+          if ($existing) {
+            Write-Host "🗑️ Deleting existing pipeline: $($existing.id)"
+            $deleteUri = "$databricksHost/api/2.1/pipelines/$($existing.id)"
+            Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
+            Start-Sleep 5  # Wait for deletion
           }
+          
+          # Step 3: Create new pipeline
+          $body = Get-Content $jsonPath -Raw
+          $createUri = "$databricksHost/api/2.1/pipelines"
+          
+          $response = Invoke-RestMethod -Uri $createUri -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+          Write-Host "✅ Pipeline created! ID: $($response.id)"
+          Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
 
     # 3. Upload Python files
     - task: PowerShell@2
@@ -88,7 +100,7 @@ stages:
               Invoke-RestMethod -Uri "$databricksHost/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
               Write-Host "✅ $relPath"
             } catch {
-              Write-Warning "⚠️ $relPath failed"
+              Write-Warning "⚠️ $relPath"
             }
           }
 
@@ -122,10 +134,10 @@ stages:
 
     # 5. Success
     - task: PowerShell@2
-      displayName: '🎉 DONE'
+      displayName: '🎉 SUCCESS'
       inputs:
         targetType: 'inline'
         script: |
           $databricksHost = "$(DATABRICKS_HOST)"
           $id = "$(PipelineId)"
-          Write-Host "🚀 SUCCESS! $databricksHost#pipeline/$id"
+          Write-Host "🚀 DEPLOYED! $databricksHost#pipeline/$id"
