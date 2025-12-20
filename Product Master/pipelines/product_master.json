@@ -5,12 +5,12 @@
   "libraries": [
     {
       "glob": {
-        "include": "/Repos/RSMAS_ADB/dlt/product_master/transformations/**"
+        "include": "/Workspace/Shared/DLT_Pipelines/product_master/transformations/**"
       }
     }
   ],
 
-  "root_path": "/Repos/RSMAS_ADB/dlt/product_master",
+  "root_path": "/Workspace/Shared/DLT_Pipelines/product_master",
 
   "catalog": "dev_rsmas_catalog",
   "schema": "rsmas_productmaster_schema",
