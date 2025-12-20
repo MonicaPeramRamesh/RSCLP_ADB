@@ -5,7 +5,7 @@ pool:
   name: Default
 
 variables:
-- group: test-dlt-vars
+- group: test-dlt-vars  # Contains YOUR URL: https://adb-10546767667865221.11.azuredatabricks.net/
 
 stages:
 - stage: Deploy
@@ -16,16 +16,16 @@ stages:
     - checkout: self
       clean: true
 
-    # 1. Update JSON
+    # 1. Update JSON for test_rsmas_catalog
     - task: PowerShell@2
       displayName: '🔧 Update Config'
       inputs:
         targetType: 'inline'
         script: |
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
-          $catalog = "$(DLT_CATALOG)"
-          $schema = "$(DLT_SCHEMA)"
-          $secretScope = "$(DLT_SECRET_SCOPE)"
+          $catalog = "$(DLT_CATALOG)"  # test_rsmas_catalog
+          $schema = "$(DLT_SCHEMA)"    # rsmas_productmaster_schema
+          $secretScope = "$(DLT_SECRET_SCOPE)"  # rsmas-test-scope
           
           $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
           $json.catalog = $catalog
@@ -35,109 +35,94 @@ stages:
           $json.configuration."rsmas.secret.scope" = $secretScope
           
           $json | ConvertTo-Json -Depth 10 | Set-Content $jsonPath -Encoding UTF8
-          Write-Host "✅ Config updated!"
+          Write-Host "✅ Updated for TEST: $catalog.$schema"
 
-    # 2. DELETE Existing Pipeline + Create New (✅ FIXES 404)
+    # 2. Deploy Pipeline to YOUR WORKSPACE
     - task: PowerShell@2
       displayName: '🚀 Deploy Pipeline'
       inputs:
         targetType: 'inline'
         script: |
-          $databricksHost = "$(DATABRICKS_HOST)"
+          $databricksHost = "$(DATABRICKS_HOST)"  # YOUR URL
           $databricksToken = "$(DATABRICKS_TOKEN)"
           $jsonPath = "$(Build.SourcesDirectory)/Product Master/pipelines/product_master.json"
+          
+          $baseUrl = "$databricksHost/workspace"  # Adds /workspace/
           
           $headers = @{
             'Authorization' = "Bearer $databricksToken"
             'Content-Type' = 'application/json'
           }
           
-          $pipelineName = (Get-Content $jsonPath -Raw | ConvertFrom-Json).name
-          Write-Host "🎯 Pipeline Name: $pipelineName"
+          # Get pipeline name
+          $pipelineConfig = Get-Content $jsonPath -Raw | ConvertFrom-Json
+          $pipelineName = $pipelineConfig.name
           
-          # Step 1: List all pipelines to find existing one
-          $listUri = "$databricksHost/api/2.1/pipelines?expand_tasks=true&limit=100"
-          $pipelines = Invoke-RestMethod -Uri $listUri -Headers $headers
+          Write-Host "🎯 Deploying '$pipelineName' to $databricksHost"
           
-          # Step 2: Delete existing pipeline (if exists)
-          $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
-          if ($existing) {
-            Write-Host "🗑️ Deleting existing pipeline: $($existing.id)"
-            $deleteUri = "$databricksHost/api/2.1/pipelines/$($existing.id)"
-            Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
-            Start-Sleep 5  # Wait for deletion
+          # Delete existing pipeline
+          try {
+            $listUri = "$baseUrl/api/2.1/pipelines"
+            $pipelines = Invoke-RestMethod -Uri $listUri -Headers $headers
+            
+            $existing = $pipelines | Where-Object { $_.name -eq $pipelineName }
+            if ($existing) {
+              Write-Host "🗑️ Deleting existing: $($existing.id)"
+              $deleteUri = "$baseUrl/api/2.1/pipelines/$($existing.id)"
+              Invoke-RestMethod -Uri $deleteUri -Method Delete -Headers $headers
+              Start-Sleep 3
+            }
+          } catch {
+            Write-Host "ℹ️ No existing pipeline or skip delete"
           }
           
-          # Step 3: Create new pipeline
+          # Create new pipeline
           $body = Get-Content $jsonPath -Raw
-          $createUri = "$databricksHost/api/2.1/pipelines"
-          
+          $createUri = "$baseUrl/api/2.1/pipelines"
           $response = Invoke-RestMethod -Uri $createUri -Method Post -Headers $headers -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
-          Write-Host "✅ Pipeline created! ID: $($response.id)"
+          
+          Write-Host "✅ Pipeline CREATED! ID: $($response.id)"
           Write-Host "##vso[task.setvariable variable=PipelineId]$($response.id)"
 
-    # 3. Upload Python files
+    # 3. Upload code files
     - task: PowerShell@2
-      displayName: '📁 Upload Code'
+      displayName: '📁 Upload Files'
       inputs:
         targetType: 'inline'
         script: |
           $databricksHost = "$(DATABRICKS_HOST)"
           $databricksToken = "$(DATABRICKS_TOKEN)"
-          $sourceDir = "$(Build.SourcesDirectory)/Product Master/transformations"
-          
-          if (-not (Test-Path $sourceDir)) { Write-Host "⚠️ No transformations"; exit 0 }
-          
+          $baseUrl = "$databricksHost/workspace"
           $headers = @{'Authorization' = "Bearer $databricksToken"}
           
-          Get-ChildItem $sourceDir -Filter "*.py" -Recurse | ForEach-Object {
-            $relPath = $_.FullName.Substring($sourceDir.Length + 1).Replace('\','/')
-            $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/transformations/$relPath"
-            $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
-            $body = @{content=$content; path=$dbPath; overwrite=$true} | ConvertTo-Json -Depth 3
-            
-            try {
-              Invoke-RestMethod -Uri "$databricksHost/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
-              Write-Host "✅ $relPath"
-            } catch {
-              Write-Warning "⚠️ $relPath"
-            }
-          }
-
-    # 4. Upload Notebooks
-    - task: PowerShell@2
-      displayName: '📓 Upload Notebooks'
-      inputs:
-        targetType: 'inline'
-        script: |
-          $databricksHost = "$(DATABRICKS_HOST)"
-          $databricksToken = "$(DATABRICKS_TOKEN)"
-          $headers = @{'Authorization' = "Bearer $databricksToken"}
-          
-          $folders = @('explorations', 'utilities')
+          $folders = @('transformations', 'explorations', 'utilities')
           foreach($folder in $folders) {
-            $path = "$(Build.SourcesDirectory)/Product Master/$folder/*.ipynb"
-            Get-ChildItem $path -ErrorAction SilentlyContinue | ForEach-Object {
-              $relPath = "$folder/$($_.Name)"
-              $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$relPath"
-              $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
-              $body = @{content=$content; path=$dbPath; overwrite=$true; format="JUPYTER"} | ConvertTo-Json
-              
-              try {
-                Invoke-RestMethod -Uri "$databricksHost/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
-                Write-Host "✅ $relPath"
-              } catch {
-                Write-Warning "⚠️ $relPath skipped"
+            $sourcePath = "$(Build.SourcesDirectory)/Product Master/$folder"
+            if (Test-Path $sourcePath) {
+              Get-ChildItem $sourcePath -Include *.py,*.ipynb -Recurse | ForEach-Object {
+                $relPath = $_.FullName.Substring("$sourcePath/".Length).Replace('\','/')
+                $dbPath = "/Repos/RSMAS_ADB/dlt/product_master/$folder/$relPath"
+                $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Content $_.FullName -Raw)))
+                
+                $body = @{content=$content; path=$dbPath; overwrite=$true}
+                if ($_.Extension -eq '.ipynb') { $body.format = "JUPYTER" }
+                $body = $body | ConvertTo-Json -Depth 3
+                
+                Invoke-RestMethod -Uri "$baseUrl/api/2.0/workspace/import" -Method Post -Headers $headers -Body $body -ContentType "application/json" | Out-Null
+                Write-Host "✅ $dbPath"
               }
             }
           }
 
-    # 5. Success
+    # 4. Success
     - task: PowerShell@2
-      displayName: '🎉 SUCCESS'
+      displayName: '🎉 COMPLETE'
       inputs:
         targetType: 'inline'
         script: |
-          $databricksHost = "$(DATABRICKS_HOST)"
+          $host = "$(DATABRICKS_HOST)"
           $id = "$(PipelineId)"
-          Write-Host "🚀 DEPLOYED! $databricksHost#pipeline/$id"
+          Write-Host "===================================="
+          Write-Host "✅ DLT DEPLOYED TO YOUR TEST WORKSPACE"
+          Write-Host "🔗 $host#pipeline/$id"
+          Write-Host "===================================="
