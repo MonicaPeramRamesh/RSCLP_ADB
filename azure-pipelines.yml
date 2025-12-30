@@ -6,7 +6,7 @@ trigger:
 pool:
   name: Default
   demands:
-    - agent.name -equals RSMAS-Agent
+    - agent.name -equals RSCLP-Agent
 
 stages:
   # ===========================================
