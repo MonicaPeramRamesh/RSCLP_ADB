@@ -1,16 +1,16 @@
 {
-  "name": "supplier_cost_price_history",
+  "name": "supplier_costprice_history",
   "pipeline_type": "WORKSPACE",
 
   "libraries": [
     {
       "glob": {
-        "include": "/Workspace/Shared/DLT_Pipelines/supplier_cost_price_history/transformations/**"
+        "include": "/Workspace/Shared/DLT_Pipelines/supplier_costprice_history/transformations/**"
       }
     }
   ],
 
-  "root_path": "/Workspace/Shared/DLT_Pipelines/supplier_cost_price_history",
+  "root_path": "/Workspace/Shared/DLT_Pipelines/supplier_costprice_history",
 
   "catalog": "dev_rsclp_catalog",
   "schema": "rsclp_schema",
