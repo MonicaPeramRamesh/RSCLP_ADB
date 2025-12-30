@@ -22,8 +22,8 @@
   "channel": "CURRENT",
 
   "configuration": {
-    "rsmas.catalog": "dev_rsclp_catalog",
-    "rsmas.schema": "rsclp_productmaster_schema",
-    "rsmas.secret.scope": "rsclp-scope"
+    "rsclp.catalog": "dev_rsclp_catalog",
+    "rsclp.schema": "rsclp_productmaster_schema",
+    "rsclp.secret.scope": "rsclp-scope"
   }
 }
