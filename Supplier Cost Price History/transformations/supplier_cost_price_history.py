@@ -13,7 +13,7 @@ supplier_pricehistory_path = dbutils.secrets.get(scope='rsclp-scope', key='maste
 # 2️⃣ Bronze Layer – Raw Product Price Updates
 # =========================================================
 @dlt.table(
-    name="dev_rsclp_catalog.rsmas_productmaster_schema.supplier_costprice_updates",
+    name="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_updates",
     comment="Raw product price updates ingested from Excel to Delta staging"
 )
 def product_price_updates():
@@ -42,7 +42,7 @@ def product_price_updates():
 # Create target table if not exists
 try:
     dlt.create_target_table(
-        name="dev_rsclp_catalog.rsmas_productmaster_schema.supplier_costprice_history",
+        name="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history",
         comment="SCD Type 2 table storing full history of product price changes per store"
     )
 except Exception as e:
@@ -52,8 +52,8 @@ except Exception as e:
 # 4️⃣ Apply SCD Type 2 logic
 # =========================================================
 dlt.apply_changes(
-    target="dev_rsclp_catalog.rsmas_productmaster_schema.supplier_costprice_history",
-    source="dev_rsclp_catalog.rsmas_productmaster_schema.supplier_costprice_updates",
+    target="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history",
+    source="dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_updates",
     keys=["ProductID"],                 # Business keys
     sequence_by=col("UpdatedOn"),                # Sequencing column
     stored_as_scd_type="2",                        # Type 2 = history tracking
