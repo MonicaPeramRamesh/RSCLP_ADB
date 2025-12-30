@@ -9,7 +9,7 @@ from pyspark.sql.functions import (
 bronze_path = dbutils.secrets.get(
     scope='rsclp-scope',
     key="master-data-path"
-)+ 'product_price_updates'
+)+ 'product/product_price_updates/'
 
 # =========================================================
 # 2️⃣ Bronze Layer – Raw Product Price Updates
