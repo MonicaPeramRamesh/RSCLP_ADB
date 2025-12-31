@@ -69,8 +69,8 @@ elif process_type == 'inbound_deliveries':
     
     df = spark.sql(f"""
         SELECT ProductID, StoreID, DeliveredQuantity as TotalQuantity, LoadTimestamp
-        FROM {ENV_CATALOG}.rsmas_gold_schema.inbound_deliveries 
-        WHERE load_date = '{target_date}' 
+        FROM {ENV_CATALOG}.rsclp_gold_schema.inbound_deliveries 
+        WHERE ProcessingDate = '{target_date}' 
           AND LoadTimestamp > TIMESTAMP '{watermark_ts}'
     """).select(
         col('ProductID'), col('StoreID'), 
