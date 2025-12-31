@@ -27,13 +27,13 @@ def daily_profits():
     # -------------------------------
     inbound_df = (
         spark.read.table(f"{CATALOG}.rsclp_gold_schema.inbound_deliveries")
-        .filter(col("load_date") == today_bst)
+        .filter(col("ProcessingDate") == today_bst)
         .select(
             col("ProductID").alias("in_ProductID"),
             col("StoreID").alias("in_StoreID"),
             col("DeliveredQuantity"),
             col("UnitCost").alias("CostPrice"),
-            col("load_date").alias("in_load_date")
+            col("ProcessingDate").alias("in_load_date")
         )
         .groupBy("in_ProductID", "in_StoreID", "in_load_date")
         .agg(
