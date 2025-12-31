@@ -32,6 +32,11 @@ from pyspark.sql.types import (
 # Current processing date
 processing_date = datetime.now(ZoneInfo("Europe/London")).date()
 
+# ---------------------------------------------------------
+# Read runtime configuration from pipeline
+# ---------------------------------------------------------
+CATALOG = spark.conf.get("rsclp.catalog")
+SCHEMA = spark.conf.get("rsclp.schema")
 
 # ---------------------------
 # Logging setup
@@ -101,7 +106,7 @@ daily_sales_silver_rules = {
 # BRONZE LAYER: Raw Data Ingestion
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_bronze_schema.daily_sales',
+    name=f'{CATALOG}.rsclp_bronze_schema.daily_sales',
     comment='Bronze layer: Raw incremental ingestion of daily sales from ADLS (schema pre-validated by ADF)',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -163,7 +168,7 @@ def parsed_sales_view():
     parsed_json != NULL => can be exploded
     """
     log("INTERMEDIATE", "Parsing ProductDetailsJson into parsed_json (single parse)")
-    bronze_df = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.daily_sales")
+    bronze_df = dlt.read_stream(f"{CATALOG}.rsclp_bronze_schema.daily_sales")
     parsed = bronze_df.withColumn("parsed_json", F.from_json(F.col("ProductDetailsJson"), product_schema))
     log("INTERMEDIATE", "parsed_sales_view created")
     return parsed
@@ -209,7 +214,7 @@ def exploded_sales_view():
 # SILVER LAYER: Cleansed & Enriched Data
 # ------------------------------
 @dlt.table(
-    name="dev_rsclp_catalog.rsclp_silver_schema.daily_sales",
+    name=f"{CATALOG}.rsclp_silver_schema.daily_sales",
     comment='Silver layer: Cleansed sales data with exploded JSON, enriched with product master, quality validated',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -257,7 +262,7 @@ def daily_sales_silver():
     )
 
     log("SILVER", "Reading product master and broadcasting for enrichment")
-    product_df = spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master")
+    product_df = spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master")
     product_small = product_df.select(
         "ProductID", "ProductName", "CategoryID", "DepartmentID", "Description", "UnitOfMeasure", "__START_AT", "__END_AT"
     ).filter(F.col('__END_AT').isNull())
@@ -293,7 +298,7 @@ def daily_sales_silver():
 # GOLD LAYER: Aggregated Analytics
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_gold_schema.daily_sales',
+    name=f'{CATALOG}.rsclp_gold_schema.daily_sales',
     comment='Gold layer: Aggregated daily sales metrics by date, store, product, and price point for analytics and reporting',
     partition_cols=["TransactionDate"],
     table_properties={
@@ -334,7 +339,7 @@ def daily_sales_gold():
     """
     log("GOLD", "Reading silver for aggregation")
     # 1. Read only new Silver rows (incremental)
-    silver_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.daily_sales")
+    silver_stream = dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.daily_sales")
 
     # 2. Add watermark (OPTIONAL - does NOT change what data is read)
     #    Allows Spark to discard very late events
@@ -366,7 +371,7 @@ def daily_sales_gold():
 # QUARANTINE LAYER: Invalid Records
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales',
+    name=f'{CATALOG}.rsclp_invalid_data_schema.invalid_daily_sales',
     comment='Quarantine layer: All invalid/rejected sales records with comprehensive failure reasons for data quality monitoring',
     partition_cols=['TransactionDate'],
     table_properties={
@@ -406,10 +411,10 @@ def invalid_daily_sales():
 
     parsed_stream = dlt.read_stream("parsed_sales_view")
     exploded_stream = dlt.read_stream("exploded_sales_view")
-    bronze_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.daily_sales")
+    bronze_stream = dlt.read_stream(f"{CATALOG}.rsclp_bronze_schema.daily_sales")
 
     product_df = (
-        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master").filter(F.col('__END_AT').isNull())
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master").filter(F.col('__END_AT').isNull())
             .select("ProductID")
             .cache()
     )
@@ -548,7 +553,7 @@ def invalid_daily_sales():
 # Invalid Sales Summary View
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_monitor_schema.invalid_sales_summary',
+    name=f'{CATALOG}.rsclp_monitor_schema.invalid_sales_summary',
     comment='Monitoring view: Aggregated invalid sales by date, type, and reason - for data quality dashboards'
 )
 def invalid_sales_summary():
@@ -574,7 +579,7 @@ def invalid_sales_summary():
     Returns:
         DataFrame: Aggregated invalid sales summary
     """
-    quarantine_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales") \
+    quarantine_stream = dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_daily_sales") \
                            .withWatermark("LoadTimestamp", "1 hour")
     return (quarantine_stream.groupBy("TransactionDateCategory", "InvalidationType", "Reason")
             .agg(
@@ -590,7 +595,7 @@ def invalid_sales_summary():
 # Pipeline Health Metrics View
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_monitor_schema.daily_pipeline_metrics',
+    name=f'{CATALOG}.rsclp_monitor_schema.daily_pipeline_metrics',
     comment='Monitoring view: Daily pipeline health metrics - valid vs invalid records with success rate'
 )
 def daily_pipeline_metrics():
@@ -613,7 +618,7 @@ def daily_pipeline_metrics():
         DataFrame: Daily pipeline metrics
     """
     # VALID RECORDS
-    silver = (dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.daily_sales")
+    silver = (dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.daily_sales")
                 .withWatermark("LoadTimestamp", "1 hour")
                 .withColumn("is_valid", F.lit(1))
                 .withColumn("is_invalid", F.lit(0))
@@ -633,7 +638,7 @@ def daily_pipeline_metrics():
                 .select("TransactionDateCategory", "is_valid", "is_invalid")
     )
 
-    invalid = (dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_daily_sales")
+    invalid = (dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_daily_sales")
                   .withWatermark("LoadTimestamp", "1 hour")
                   .withColumn("is_valid", F.lit(0))
                   .withColumn("is_invalid", F.lit(1))

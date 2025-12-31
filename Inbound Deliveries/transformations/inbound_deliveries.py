@@ -33,6 +33,12 @@ from pyspark.sql.types import (
 # Current processing date
 processing_date = datetime.now(ZoneInfo("Europe/London")).date()
 
+# ---------------------------------------------------------
+# Read runtime configuration from pipeline
+# ---------------------------------------------------------
+CATALOG = spark.conf.get("rsclp.catalog")
+SCHEMA = spark.conf.get("rsclp.schema")
+
 # ---------------------------
 # Logging setup
 # ---------------------------
@@ -97,7 +103,7 @@ deliveries_silver_rules = {
 # BRONZE LAYER: Raw Data Ingestion
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_bronze_schema.inbound_deliveries',
+    name=f'{CATALOG}.rsclp_bronze_schema.inbound_deliveries',
     comment='Bronze layer: Raw incremental ingestion of inbound deliveries from ADLS',
     partition_cols=['ShipmentDate'],
     table_properties={
@@ -147,7 +153,7 @@ def inbound_deliveries_bronze():
 # SILVER LAYER: Cleansed & Enriched Data
 # ------------------------------
 @dlt.table(
-    name="dev_rsclp_catalog.rsclp_silver_schema.inbound_deliveries",
+    name=f"{CATALOG}.rsclp_silver_schema.inbound_deliveries",
     comment='Silver layer: Validated deliveries enriched with product master and supplier pricing',
     partition_cols=['ShipmentDate'],
     table_properties={
@@ -187,7 +193,7 @@ def inbound_deliveries_silver():
         DataFrame: Cleansed and enriched delivery data (ONLY fully valid records)
     """
     log("SILVER", "Reading bronze for silver processing")
-    bronze_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.inbound_deliveries")
+    bronze_stream = dlt.read_stream(f"{CATALOG}.rsclp_bronze_schema.inbound_deliveries")
     
     # Filter valid records
     filtered = bronze_stream.dropna(subset=[
@@ -198,7 +204,7 @@ def inbound_deliveries_silver():
     
     # Product master (rename to avoid clashes)
     product_df = (
-        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master")
         .filter(F.col("__END_AT").isNull())
         .select(
             "ProductID",
@@ -210,7 +216,7 @@ def inbound_deliveries_silver():
     
     # Supplier pricing
     supplier_df = (
-        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.supplier_costprice_history")
         .filter(F.col("__END_AT").isNull())
         .select(
             F.col("ProductID").alias("SupplierProductID"),
@@ -242,7 +248,7 @@ def inbound_deliveries_silver():
 # GOLD LAYER: Aggregated Analytics
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_gold_schema.inbound_deliveries',
+    name=f'{CATALOG}.rsclp_gold_schema.inbound_deliveries',
     comment='Gold layer: Aggregated delivery metrics by date, store, product, and cost for inventory updates',
     partition_cols=["ShipmentDate"],
     table_properties={
@@ -282,7 +288,7 @@ def inbound_deliveries_gold():
         DataFrame: Aggregated delivery metrics
     """
     log("GOLD", "Reading silver for aggregation")
-    silver_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.inbound_deliveries")
+    silver_stream = dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.inbound_deliveries")
     
     # Add watermark
     silver_stream = silver_stream.withWatermark("LoadTimestamp", "2 hours")
@@ -313,7 +319,7 @@ def inbound_deliveries_gold():
 # QUARANTINE LAYER: Invalid Records
 # ------------------------------
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_inbound_deliveries',
+    name=f'{CATALOG}.rsclp_invalid_data_schema.invalid_inbound_deliveries',
     comment='Quarantine layer: All invalid/rejected delivery records with comprehensive failure reasons',
     partition_cols=['ShipmentDate'],
     table_properties={
@@ -353,11 +359,11 @@ def invalid_inbound_deliveries():
     """
     log("QUARANTINE", "Collecting invalid delivery records")
     
-    bronze_stream = dlt.read_stream("dev_rsclp_catalog.rsclp_bronze_schema.inbound_deliveries")
+    bronze_stream = dlt.read_stream(f"{CATALOG}.rsclp_bronze_schema.inbound_deliveries")
     
     # Active product master
     product_df = (
-        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.product_master")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.product_master")
         .filter(F.col("__END_AT").isNull())
         .select("ProductID")
         .cache()
@@ -468,7 +474,7 @@ def invalid_inbound_deliveries():
     # =====================================================================
     # Active supplier pricing
     supplier_df = (
-        spark.read.table("dev_rsclp_catalog.rsclp_productmaster_schema.supplier_costprice_history")
+        spark.read.table(f"{CATALOG}.rsclp_productmaster_schema.supplier_costprice_history")
         .filter(F.col("__END_AT").isNull())
         .select("ProductID", "SupplierID", "SupplierPrice")
     )
@@ -546,7 +552,7 @@ def invalid_inbound_deliveries():
 # ================================================================================
 
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_monitor_schema.invalid_deliveries_summary',
+    name=f'{CATALOG}.rsclp_monitor_schema.invalid_deliveries_summary',
     comment='Monitoring view: Aggregated invalid deliveries by date, type, and reason'
 )
 def invalid_deliveries_summary():
@@ -557,7 +563,7 @@ def invalid_deliveries_summary():
         DataFrame: Aggregated invalid delivery summary
     """
     quarantine_stream = (
-        dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_inbound_deliveries")
+        dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_inbound_deliveries")
         .withWatermark("LoadTimestamp", "1 hour")
     )
     
@@ -573,7 +579,7 @@ def invalid_deliveries_summary():
     )
 
 @dlt.table(
-    name='dev_rsclp_catalog.rsclp_monitor_schema.deliveries_pipeline_metrics',
+    name=f'{CATALOG}.rsclp_monitor_schema.deliveries_pipeline_metrics',
     comment='Monitoring view: Daily delivery pipeline health metrics'
 )
 def deliveries_pipeline_metrics():
@@ -585,7 +591,7 @@ def deliveries_pipeline_metrics():
     """
     # Valid records
     silver = (
-        dlt.read_stream("dev_rsclp_catalog.rsclp_silver_schema.inbound_deliveries")
+        dlt.read_stream(f"{CATALOG}.rsclp_silver_schema.inbound_deliveries")
         .withWatermark("LoadTimestamp", "1 hour")
         .withColumn("is_valid", F.lit(1))
         .withColumn("is_invalid", F.lit(0))
@@ -606,7 +612,7 @@ def deliveries_pipeline_metrics():
     
     # Invalid records
     invalid = (
-        dlt.read_stream("dev_rsclp_catalog.rsclp_invalid_data_schema.invalid_inbound_deliveries")
+        dlt.read_stream(f"{CATALOG}.rsclp_invalid_data_schema.invalid_inbound_deliveries")
         .withWatermark("LoadTimestamp", "1 hour")
         .withColumn("is_valid", F.lit(0))
         .withColumn("is_invalid", F.lit(1))

@@ -26,6 +26,12 @@ from pyspark.sql.types import *
 # Current processing date
 processing_date = datetime.now(ZoneInfo("Europe/London")).date()
 
+# ---------------------------------------------------------
+# Read runtime configuration from pipeline
+# ---------------------------------------------------------
+CATALOG = spark.conf.get("rsclp.catalog")
+SCHEMA = spark.conf.get("rsclp.schema")
+
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] [%(stage)s] %(message)s')
 logger = logging.getLogger("dlt_supplier_orders")
@@ -128,7 +134,7 @@ supplier_orders_silver_rules = {
 
 # ==================== BRONZE LAYER ====================
 @dlt.table(
-    name='rsclp_catalog.rsclp_bronze_schema.supplier_orders',
+    name=f'{CATALOG}.rsclp_bronze_schema.supplier_orders',
     comment='Bronze: Raw AI supplier orders from Parquet',
     partition_cols=['OrderDate'],
     table_properties={
@@ -179,7 +185,7 @@ def parsed_orders_view():
         DataFrame: Orders with validated nested structure
     """
     return (
-        dlt.read_stream("rsclp_catalog.rsclp_bronze_schema.supplier_orders")
+        dlt.read_stream(f"{CATALOG}.rsclp_bronze_schema.supplier_orders")
         .withColumn("has_items", F.when(F.col("LineItems").isNotNull(), F.lit(True)).otherwise(F.lit(False)))
     )
 
