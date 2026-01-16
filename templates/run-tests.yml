@@ -75,33 +75,33 @@ steps:
           try {
             $uploadBatPath = "$testBasePath/utils/upload_to_adls.bat"
             
-            # Create notebook to execute the bat file
-            $pipelineNameEscaped = $pipelineName
-            $uploadNotebook = @"
-# Databricks notebook source
-import subprocess
-import os
-
-print("=" * 60)
-print("Running upload_to_adls.bat for $pipelineNameEscaped")
-print("=" * 60)
-
-bat_path = "/Workspace/Shared/Tests/$pipelineNameEscaped/utils/upload_to_adls.bat"
-with open(bat_path, "r") as f:
-    commands = f.readlines()
-
-for cmd in commands:
-    cmd = cmd.strip()
-    if cmd and not cmd.startswith("@") and not cmd.startswith("REM"):
-        print("Executing: " + cmd)
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print("Error: " + result.stderr)
-            raise Exception("Command failed: " + cmd)
-
-print("Upload completed successfully")
-"@
+            # Create notebook to execute the bat file - using array of lines
+            $uploadNotebookLines = @(
+              '# Databricks notebook source',
+              'import subprocess',
+              'import os',
+              '',
+              'print("=" * 60)',
+              "print(`"Running upload_to_adls.bat for $pipelineName`")",
+              'print("=" * 60)',
+              '',
+              "bat_path = `"/Workspace/Shared/Tests/$pipelineName/utils/upload_to_adls.bat`"",
+              'with open(bat_path, "r") as f:',
+              '    commands = f.readlines()',
+              '',
+              'for cmd in commands:',
+              '    cmd = cmd.strip()',
+              '    if cmd and not cmd.startswith("@") and not cmd.startswith("REM"):',
+              '        print("Executing: " + cmd)',
+              '        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)',
+              '        print(result.stdout)',
+              '        if result.returncode != 0:',
+              '            print("Error: " + result.stderr)',
+              '            raise Exception("Command failed: " + cmd)',
+              '',
+              'print("Upload completed successfully")'
+            )
+            $uploadNotebook = $uploadNotebookLines -join "`n"
             
             $b64Content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($uploadNotebook))
             
@@ -253,35 +253,35 @@ print("Upload completed successfully")
           try {
             $testsPath = "$testBasePath/tests"
             
-            # Create test runner notebook
-            $pipelineNameEscaped = $pipelineName
-            $testRunner = @"
-# Databricks notebook source
-import subprocess
-import sys
-import os
-
-print("=" * 60)
-print("Running Test Cases for $pipelineNameEscaped")
-print("=" * 60)
-
-subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest", "pytest-html", "--quiet"])
-
-test_path = "/Workspace/Shared/Tests/$pipelineNameEscaped/tests"
-result = subprocess.run(
-    ["python", "-m", "pytest", test_path, "-v", "--tb=short", "--maxfail=1"],
-    capture_output=True,
-    text=True
-)
-
-print(result.stdout)
-print(result.stderr)
-
-if result.returncode != 0:
-    raise Exception("Tests failed for $pipelineNameEscaped")
-
-print("All tests passed for $pipelineNameEscaped")
-"@
+            # Create test runner notebook - using array of lines
+            $testRunnerLines = @(
+              '# Databricks notebook source',
+              'import subprocess',
+              'import sys',
+              'import os',
+              '',
+              'print("=" * 60)',
+              "print(`"Running Test Cases for $pipelineName`")",
+              'print("=" * 60)',
+              '',
+              'subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest", "pytest-html", "--quiet"])',
+              '',
+              "test_path = `"/Workspace/Shared/Tests/$pipelineName/tests`"",
+              'result = subprocess.run(',
+              '    ["python", "-m", "pytest", test_path, "-v", "--tb=short", "--maxfail=1"],',
+              '    capture_output=True,',
+              '    text=True',
+              ')',
+              '',
+              'print(result.stdout)',
+              'print(result.stderr)',
+              '',
+              'if result.returncode != 0:',
+              "    raise Exception(`"Tests failed for $pipelineName`")",
+              '',
+              "print(`"All tests passed for $pipelineName`")"
+            )
+            $testRunner = $testRunnerLines -join "`n"
             
             $b64TestContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($testRunner))
             
