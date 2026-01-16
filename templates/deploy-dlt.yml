@@ -1,0 +1,451 @@
+parameters:
+  - name: environment
+    type: string
+  - name: databricksHost
+    type: string
+  - name: databricksToken
+    type: string
+  - name: dltCatalog
+    type: string
+  - name: dltSchema
+    type: string
+  - name: dltSecretScope
+    type: string
+
+steps:
+  - task: PowerShell@2
+    displayName: 'Setup Databricks CLI'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "============================================================"
+        Write-Host "  Setting up Databricks CLI for ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        
+        # Install CLI
+        pip install databricks-cli --quiet
+        Write-Host "✅ Databricks CLI installed"
+        
+        # Configure CLI
+        $env:DATABRICKS_HOST = "${{ parameters.databricksHost }}"
+        $env:DATABRICKS_TOKEN = "${{ parameters.databricksToken }}"
+        
+        @"
+        [DEFAULT]
+        host = ${{ parameters.databricksHost }}
+        token = ${{ parameters.databricksToken }}
+        "@ | Out-File "$env:USERPROFILE\.databrickscfg" -Encoding ASCII -Force
+        
+        Write-Host "✅ Databricks CLI configured"
+        Write-Host "============================================================"
+
+  - task: PowerShell@2
+    displayName: 'Deploy DLT Pipelines'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "============================================================"
+        Write-Host "  Deploying DLT Pipelines to ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        
+        $headers = @{
+          Authorization = "Bearer ${{ parameters.databricksToken }}"
+          "Content-Type" = "application/json"
+        }
+        $src = "$(Build.SourcesDirectory)"
+        
+        # Find all pipeline JSON files
+        $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where-Object {
+          $_.Directory.Name -eq "pipelines"
+        }
+        
+        Write-Host "`n📋 Found $($pipes.Count) pipeline(s) to deploy"
+        
+        if ($pipes.Count -eq 0) {
+          Write-Host "⚠️  No DLT pipelines found. Skipping pipeline deployment."
+          exit 0
+        }
+        
+        $pipelineSuccess = 0
+        $pipelineFailed = 0
+        
+        # Deploy each pipeline
+        foreach ($p in $pipes) {
+          $name = $p.BaseName
+          $folder = $p.Directory.Parent
+          
+          Write-Host "`n============================================================"
+          Write-Host "📦 Deploying Pipeline: $name"
+          Write-Host "============================================================"
+          
+          try {
+            $base = "/Workspace/Shared/DLT_Pipelines/$name"
+            
+            # Create directory structure (NO notebooks folder)
+            Write-Host "`n📁 Creating directory structure..."
+            $dirs = @($base, "$base/transformations", "$base/utilities")
+            foreach ($dir in $dirs) {
+              try {
+                $body = @{ path = $dir } | ConvertTo-Json
+                Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/mkdirs" `
+                  -Headers $headers `
+                  -Method Post `
+                  -Body $body `
+                  -ErrorAction SilentlyContinue | Out-Null
+              } catch {
+                # Directory might already exist
+              }
+            }
+            Write-Host "  ✅ Directories created"
+            
+            # Update pipeline configuration
+            Write-Host "`n⚙️  Configuring pipeline..."
+            $cfg = Get-Content $p.FullName | ConvertFrom-Json
+            $cfg.catalog = "${{ parameters.dltCatalog }}"
+            $cfg.schema = "${{ parameters.dltSchema }}"
+            
+            if (!$cfg.configuration) {
+              $cfg | Add-Member -NotePropertyName configuration -NotePropertyValue @{}
+            }
+            
+            $cfg.configuration | Add-Member -NotePropertyName 'rsmas.catalog' `
+              -NotePropertyValue "${{ parameters.dltCatalog }}" -Force
+            $cfg.configuration | Add-Member -NotePropertyName 'rsmas.schema' `
+              -NotePropertyValue "${{ parameters.dltSchema }}" -Force
+            $cfg.configuration | Add-Member -NotePropertyName 'rsmas.secret.scope' `
+              -NotePropertyValue "${{ parameters.dltSecretScope }}" -Force
+            
+            # Update library paths
+            if ($cfg.libraries) {
+              $cfg.libraries | ForEach-Object {
+                if ($_.glob) {
+                  $_.glob.include = "$base/transformations/**"
+                }
+              }
+            }
+            
+            $tmp = "$env:TEMP\$name.json"
+            $cfg | ConvertTo-Json -Depth 10 | Set-Content $tmp
+            Write-Host "  ✅ Configuration updated"
+            
+            # Upload transformations
+            Write-Host "`n📦 Uploading transformations..."
+            $trans = Join-Path $folder.FullName "transformations"
+            $transCount = 0
+            if (Test-Path $trans) {
+              Get-ChildItem $trans -File -Filter *.py -Recurse | ForEach-Object {
+                $tgt = "$base/transformations/$($_.Name)"
+                $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                
+                $body = @{
+                  path      = $tgt
+                  content   = $b64
+                  language  = "PYTHON"
+                  overwrite = $true
+                  format    = "SOURCE"
+                } | ConvertTo-Json
+                
+                Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/import" `
+                  -Headers $headers `
+                  -Method Post `
+                  -Body $body | Out-Null
+                
+                Write-Host "  ✅ $($_.Name)"
+                $transCount++
+              }
+              Write-Host "  📊 Uploaded $transCount transformation(s)"
+            } else {
+              Write-Host "  ⚠️  No transformations folder found"
+            }
+            
+            # Upload utilities
+            Write-Host "`n🔧 Uploading utilities..."
+            $util = Join-Path $folder.FullName "utilities"
+            $utilCount = 0
+            if (Test-Path $util) {
+              Get-ChildItem $util -File -Recurse | Where-Object {
+                $_.Extension -in @(".ipynb", ".py", ".sql")
+              } | ForEach-Object {
+                $tgt = "$base/utilities/$($_.Name)"
+                $fmt = "SOURCE"
+                $lang = "PYTHON"
+                
+                if ($_.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+                if ($_.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+                
+                $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName))
+                
+                $body = @{
+                  path      = $tgt
+                  content   = $b64
+                  language  = $lang
+                  overwrite = $true
+                  format    = $fmt
+                } | ConvertTo-Json
+                
+                Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/import" `
+                  -Headers $headers `
+                  -Method Post `
+                  -Body $body | Out-Null
+                
+                Write-Host "  ✅ $($_.Name)"
+                $utilCount++
+              }
+              Write-Host "  📊 Uploaded $utilCount utility file(s)"
+            } else {
+              Write-Host "  ⚠️  No utilities folder found"
+            }
+            
+            # Create or update DLT pipeline
+            Write-Host "`n🚀 Creating/Updating DLT pipeline..."
+            $list = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines" `
+              -Headers $headers `
+              -Method Get
+            
+            $existing = $list.statuses | Where-Object { $_.name -eq $name } | Select-Object -First 1
+            
+            if ($existing) {
+              Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines/$($existing.pipeline_id)" `
+                -Headers $headers `
+                -Method Put `
+                -Body (Get-Content $tmp -Raw) | Out-Null
+              Write-Host "  ✅ Pipeline updated (ID: $($existing.pipeline_id))"
+            } else {
+              $result = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines" `
+                -Headers $headers `
+                -Method Post `
+                -Body (Get-Content $tmp -Raw)
+              Write-Host "  ✅ Pipeline created (ID: $($result.pipeline_id))"
+            }
+            
+            $pipelineSuccess++
+            Write-Host "`n✅ Pipeline '$name' deployed successfully!"
+            
+          } catch {
+            $pipelineFailed++
+            Write-Host "`n❌ Failed to deploy pipeline '$name': $($_.Exception.Message)" -ForegroundColor Red
+          }
+        }
+        
+        Write-Host "`n============================================================"
+        Write-Host "  DLT PIPELINE SUMMARY - ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        Write-Host "  Total Pipelines: $($pipes.Count)"
+        Write-Host "  Successful:      $pipelineSuccess" -ForegroundColor Green
+        Write-Host "  Failed:          $pipelineFailed" -ForegroundColor $(if($pipelineFailed -gt 0){'Red'}else{'Green'})
+        Write-Host "============================================================"
+        
+        if ($pipelineFailed -gt 0) {
+          Write-Host "⚠️  Some pipelines failed to deploy. Please review the logs above." -ForegroundColor Yellow
+          exit 1
+        }
+
+  - task: PowerShell@2
+    displayName: 'Deploy Standalone Notebooks'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "`n============================================================"
+        Write-Host "  Deploying Standalone Notebooks to ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        
+        $headers = @{
+          Authorization = "Bearer ${{ parameters.databricksToken }}"
+          "Content-Type" = "application/json"
+        }
+        $src = "$(Build.SourcesDirectory)"
+        
+        # Find all pipeline directories to exclude
+        $pipes = Get-ChildItem $src -Filter "*.json" -Recurse | Where-Object {
+          $_.Directory.Name -eq "pipelines"
+        }
+        
+        $pipelineDirs = @()
+        if ($pipes) {
+          $pipelineDirs = $pipes | ForEach-Object { $_.Directory.Parent.FullName }
+        }
+        
+        Write-Host "`n📋 Identified $($pipelineDirs.Count) pipeline directories to exclude"
+        
+        # Find standalone notebook folders (not inside pipeline directories)
+        $nbFolders = Get-ChildItem $src -Directory -Recurse | Where-Object {
+          $_.Name -in @("notebooks", "explorations", "analysis") -and
+          -not ($pipelineDirs -contains $_.Parent.FullName)
+        }
+        
+        Write-Host "📋 Found $($nbFolders.Count) standalone notebook folder(s)"
+        
+        if ($nbFolders.Count -eq 0) {
+          Write-Host "⚠️  No standalone notebooks found. Skipping notebook deployment."
+          exit 0
+        }
+        
+        # Create base notebooks directory
+        $base = "/Workspace/Shared/Notebooks"
+        try {
+          $body = @{ path = $base } | ConvertTo-Json
+          Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/mkdirs" `
+            -Headers $headers `
+            -Method Post `
+            -Body $body `
+            -ErrorAction SilentlyContinue | Out-Null
+        } catch {
+          # Directory might already exist
+        }
+        
+        $totalNotebooks = 0
+        $successCount = 0
+        $failCount = 0
+        
+        # Deploy notebooks from each folder
+        foreach ($nbf in $nbFolders) {
+          Write-Host "`n------------------------------------------------------------"
+          Write-Host "📓 Processing: $($nbf.Parent.Name)/$($nbf.Name)"
+          Write-Host "------------------------------------------------------------"
+          
+          $files = Get-ChildItem $nbf.FullName -File -Recurse | Where-Object {
+            $_.Extension -in @(".ipynb", ".py", ".sql")
+          }
+          
+          foreach ($file in $files) {
+            $totalNotebooks++
+            $tgt = "$base/$($file.Name)"
+            $fmt = "SOURCE"
+            $lang = "PYTHON"
+            
+            if ($file.Extension -eq ".ipynb") { $fmt = "JUPYTER" }
+            if ($file.Extension -eq ".sql") { $fmt = "SQL"; $lang = "SQL" }
+            
+            try {
+              $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName))
+              
+              $body = @{
+                path      = $tgt
+                content   = $b64
+                language  = $lang
+                overwrite = $true
+                format    = $fmt
+              } | ConvertTo-Json
+              
+              Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/import" `
+                -Headers $headers `
+                -Method Post `
+                -Body $body | Out-Null
+              
+              Write-Host "  ✅ $($file.Name)" -ForegroundColor Green
+              $successCount++
+            } catch {
+              Write-Host "  ❌ $($file.Name) - $($_.Exception.Message)" -ForegroundColor Red
+              $failCount++
+            }
+          }
+        }
+        
+        Write-Host "`n============================================================"
+        Write-Host "  NOTEBOOK DEPLOYMENT SUMMARY - ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        Write-Host "  Notebook Folders: $($nbFolders.Count)"
+        Write-Host "  Total Notebooks:  $totalNotebooks"
+        Write-Host "  Successful:       $successCount" -ForegroundColor Green
+        Write-Host "  Failed:           $failCount" -ForegroundColor $(if($failCount -gt 0){'Red'}else{'Green'})
+        Write-Host "  Location:         $base"
+        Write-Host "============================================================"
+        
+        if ($failCount -gt 0) {
+          Write-Host "⚠️  Some notebooks failed to deploy. Please review the logs above." -ForegroundColor Yellow
+          exit 1
+        }
+        
+        Write-Host "✅ All standalone notebooks deployed successfully!"
+
+  - task: PowerShell@2
+    displayName: 'Verify Deployment'
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "`n============================================================"
+        Write-Host "  Verifying Deployment in ${{ parameters.environment }}"
+        Write-Host "============================================================"
+        
+        $headers = @{
+          Authorization = "Bearer ${{ parameters.databricksToken }}"
+          "Content-Type" = "application/json"
+        }
+        
+        $allGood = $true
+        
+        # Verify DLT Pipelines directory
+        Write-Host "`n🔍 Checking DLT Pipelines..."
+        try {
+          $pipelinePath = [uri]::EscapeDataString("/Workspace/Shared/DLT_Pipelines")
+          $result = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$pipelinePath" `
+            -Headers $headers `
+            -Method Get
+          
+          $pipelineDirs = $result.objects | Where-Object { $_.object_type -eq "DIRECTORY" }
+          Write-Host "  ✅ Found $($pipelineDirs.Count) pipeline(s)"
+          
+          foreach ($dir in $pipelineDirs) {
+            $dirPath = [uri]::EscapeDataString($dir.path)
+            $dirResult = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$dirPath" `
+              -Headers $headers `
+              -Method Get
+            
+            $hasTransformations = $dirResult.objects | Where-Object { $_.path -like "*/transformations" }
+            $hasUtilities = $dirResult.objects | Where-Object { $_.path -like "*/utilities" }
+            $hasNotebooks = $dirResult.objects | Where-Object { $_.path -like "*/notebooks" }
+            
+            Write-Host "    📁 $($dir.path)"
+            Write-Host "       - Transformations: $(if($hasTransformations){'✅'}else{'⚠️'})"
+            Write-Host "       - Utilities: $(if($hasUtilities){'✅'}else{'⚠️'})"
+            
+            # Check if notebooks folder exists (it shouldn't)
+            if ($hasNotebooks) {
+              Write-Host "       - Notebooks: ⚠️  FOUND (should not exist)" -ForegroundColor Yellow
+            }
+          }
+        } catch {
+          Write-Host "  ⚠️  DLT Pipelines directory not found or empty" -ForegroundColor Yellow
+        }
+        
+        # Verify Standalone Notebooks directory
+        Write-Host "`n🔍 Checking Standalone Notebooks..."
+        try {
+          $notebooksPath = [uri]::EscapeDataString("/Workspace/Shared/Notebooks")
+          $result = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$notebooksPath" `
+            -Headers $headers `
+            -Method Get
+          
+          $notebooks = $result.objects | Where-Object { $_.object_type -ne "DIRECTORY" }
+          Write-Host "  ✅ Found $($notebooks.Count) standalone notebook(s)"
+        } catch {
+          Write-Host "  ⚠️  Notebooks directory not found or empty" -ForegroundColor Yellow
+        }
+        
+        # Verify DLT Pipelines exist
+        Write-Host "`n🔍 Checking DLT Pipeline Definitions..."
+        try {
+          $pipelineList = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines" `
+            -Headers $headers `
+            -Method Get
+          
+          if ($pipelineList.statuses) {
+            Write-Host "  ✅ Found $($pipelineList.statuses.Count) DLT pipeline definition(s)"
+            foreach ($pipeline in $pipelineList.statuses) {
+              Write-Host "    - $($pipeline.name) (ID: $($pipeline.pipeline_id))"
+            }
+          } else {
+            Write-Host "  ⚠️  No DLT pipeline definitions found" -ForegroundColor Yellow
+          }
+        } catch {
+          Write-Host "  ❌ Failed to retrieve pipeline definitions" -ForegroundColor Red
+          $allGood = $false
+        }
+        
+        Write-Host "`n============================================================"
+        if ($allGood) {
+          Write-Host "✅ Deployment verification completed successfully!"
+        } else {
+          Write-Host "⚠️  Deployment verification completed with warnings"
+        }
+        Write-Host "============================================================"
