@@ -8,71 +8,12 @@ parameters:
 
 steps:
   - task: PowerShell@2
-    displayName: 'Discover Test Pipelines'
+    displayName: 'Discover and Run Tests'
     inputs:
       targetType: 'inline'
       script: |
         Write-Host "============================================================"
-        Write-Host "  Discovering Test Pipelines in ${{ parameters.environment }}"
-        Write-Host "============================================================"
-        
-        # The TestRepo is checked out to a subdirectory
-        # Find the correct source directory
-        $buildDir = "$(Build.SourcesDirectory)"
-        Write-Host "Build directory: $buildDir"
-        
-        # List contents to see what we have
-        Write-Host "`nDirectory contents:"
-        Get-ChildItem $buildDir | ForEach-Object { Write-Host "  - $($_.Name)" }
-        
-        # The test repository should be in a subdirectory named after the repository resource
-        $testRepoDir = Join-Path $buildDir "TestRepo"
-        
-        if (-not (Test-Path $testRepoDir)) {
-          # Try alternate location
-          $testRepoDir = Join-Path $buildDir "RSCLP_TEST"
-        }
-        
-        if (-not (Test-Path $testRepoDir)) {
-          Write-Host "`n❌ Error: Test repository not found!" -ForegroundColor Red
-          Write-Host "Checked locations:" -ForegroundColor Red
-          Write-Host "  - $(Join-Path $buildDir 'TestRepo')" -ForegroundColor Red
-          Write-Host "  - $(Join-Path $buildDir 'RSCLP_TEST')" -ForegroundColor Red
-          exit 1
-        }
-        
-        Write-Host "`n✅ Found test repository at: $testRepoDir"
-        
-        $pipelinesDir = Join-Path $testRepoDir "pipelines"
-        
-        if (-not (Test-Path $pipelinesDir)) {
-          Write-Host "❌ Error: 'pipelines' directory not found in test repository!" -ForegroundColor Red
-          Write-Host "Path checked: $pipelinesDir" -ForegroundColor Red
-          exit 1
-        }
-        
-        # Get all pipeline folders
-        $pipelineFolders = Get-ChildItem $pipelinesDir -Directory
-        
-        Write-Host "`n📋 Found $($pipelineFolders.Count) pipeline(s) to test:"
-        foreach ($pf in $pipelineFolders) {
-          Write-Host "  - $($pf.Name)"
-        }
-        
-        # Store pipeline names for next steps
-        $pipelineNames = $pipelineFolders | ForEach-Object { $_.Name }
-        $pipelineNamesJson = $pipelineNames | ConvertTo-Json -Compress
-        
-        Write-Host "`n##vso[task.setvariable variable=PipelineNames]$pipelineNamesJson"
-        Write-Host "============================================================"
-
-  - task: PowerShell@2
-    displayName: 'Run Pipeline Tests'
-    inputs:
-      targetType: 'inline'
-      script: |
-        Write-Host "============================================================"
-        Write-Host "  Running Pipeline Tests in ${{ parameters.environment }}"
+        Write-Host "  Running Tests in ${{ parameters.environment }}"
         Write-Host "============================================================"
         
         $headers = @{
@@ -80,259 +21,79 @@ steps:
           "Content-Type" = "application/json"
         }
         
-        $pipelineNames = '$(PipelineNames)' | ConvertFrom-Json
+        # Discover pipelines from Databricks Tests folder
+        Write-Host "`n📋 Discovering test pipelines from Databricks..."
         
-        if (-not $pipelineNames -or $pipelineNames.Count -eq 0) {
-          Write-Host "⚠️  No pipelines to test. Skipping test execution."
+        try {
+          $testsPath = [uri]::EscapeDataString("/Workspace/Shared/Tests/pipelines")
+          $testsFolders = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/list?path=$testsPath" `
+            -Headers $headers `
+            -Method Get
+          
+          $pipelineFolders = $testsFolders.objects | Where-Object { $_.object_type -eq "DIRECTORY" }
+          
+          Write-Host "✅ Found $($pipelineFolders.Count) pipeline(s) to test:"
+          foreach ($pf in $pipelineFolders) {
+            $pipelineName = Split-Path $pf.path -Leaf
+            Write-Host "  - $pipelineName"
+          }
+          
+        } catch {
+          Write-Host "❌ Error discovering test pipelines: $($_.Exception.Message)" -ForegroundColor Red
+          Write-Host "Make sure RSCLP_TEST pipeline has deployed tests to /Workspace/Shared/Tests/pipelines/" -ForegroundColor Yellow
+          exit 1
+        }
+        
+        if ($pipelineFolders.Count -eq 0) {
+          Write-Host "⚠️  No test pipelines found. Skipping test execution." -ForegroundColor Yellow
           exit 0
         }
         
         $allTestsPassed = $true
         $testResults = @()
         
-        foreach ($pipelineName in $pipelineNames) {
+        # Run tests for each pipeline
+        foreach ($pf in $pipelineFolders) {
+          $pipelineName = Split-Path $pf.path -Leaf
+          
           Write-Host "`n============================================================"
           Write-Host "🧪 Testing Pipeline: $pipelineName"
           Write-Host "============================================================"
           
-          $testBasePath = "/Workspace/Shared/Tests/pipelines/$pipelineName"
+          $runTestsNotebook = "/Workspace/Shared/Tests/pipelines/$pipelineName/utils/run_tests"
           
-          # Step 1: Run upload_to_adls.bat
-          Write-Host "`n📤 Step 1: Running upload_to_adls.bat..."
-          try {
-            $uploadBatPath = "$testBasePath/utils/upload_to_adls.bat"
-            
-            # Create notebook to execute the bat file - using array of lines
-            $uploadNotebookLines = @(
-              '# Databricks notebook source',
-              'import subprocess',
-              'import os',
-              '',
-              'print("=" * 60)',
-              "print(`"Running upload_to_adls.bat for $pipelineName`")",
-              'print("=" * 60)',
-              '',
-              "bat_path = `"/Workspace/Shared/Tests/$pipelineName/utils/upload_to_adls.bat`"",
-              'with open(bat_path, "r") as f:',
-              '    commands = f.readlines()',
-              '',
-              'for cmd in commands:',
-              '    cmd = cmd.strip()',
-              '    if cmd and not cmd.startswith("@") and not cmd.startswith("REM"):',
-              '        print("Executing: " + cmd)',
-              '        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)',
-              '        print(result.stdout)',
-              '        if result.returncode != 0:',
-              '            print("Error: " + result.stderr)',
-              '            raise Exception("Command failed: " + cmd)',
-              '',
-              'print("Upload completed successfully")'
-            )
-            $uploadNotebook = $uploadNotebookLines -join "`n"
-            
-            $b64Content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($uploadNotebook))
-            
-            $uploadBody = @{
-              path      = "$testBasePath/temp_upload_runner"
-              content   = $b64Content
-              language  = "PYTHON"
-              overwrite = $true
-              format    = "SOURCE"
-            } | ConvertTo-Json
-            
-            Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/import" `
-              -Headers $headers `
-              -Method Post `
-              -Body $uploadBody | Out-Null
-            
-            # Run the notebook as a job
-            $uploadJobBody = @{
-              run_name = "Upload_ADLS_${pipelineName}_${{ parameters.environment }}"
-              tasks = @(
-                @{
-                  task_key = "upload_data"
-                  notebook_task = @{
-                    notebook_path = "$testBasePath/temp_upload_runner"
-                  }
-                  new_cluster = @{
-                    spark_version = "13.3.x-scala2.12"
-                    node_type_id = "Standard_DS3_v2"
-                    num_workers = 1
-                  }
-                  timeout_seconds = 1800
-                }
-              )
-            } | ConvertTo-Json -Depth 10
-            
-            $uploadRun = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/submit" `
-              -Headers $headers `
-              -Method Post `
-              -Body $uploadJobBody
-            
-            $uploadRunId = $uploadRun.run_id
-            Write-Host "  ✅ Upload job submitted (Run ID: $uploadRunId)"
-            
-            # Wait for completion
-            $maxWait = 30
-            $startTime = Get-Date
-            $uploadCompleted = $false
-            
-            while (-not $uploadCompleted) {
-              Start-Sleep -Seconds 10
-              
-              $runStatus = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/get?run_id=$uploadRunId" `
-                -Headers $headers `
-                -Method Get
-              
-              $state = $runStatus.state.life_cycle_state
-              
-              if ($state -eq "TERMINATED") {
-                $uploadCompleted = $true
-                if ($runStatus.state.result_state -ne "SUCCESS") {
-                  Write-Host "  ❌ Upload failed!" -ForegroundColor Red
-                  $allTestsPassed = $false
-                  continue
-                }
-                Write-Host "  ✅ Upload completed successfully"
-              }
-              
-              $elapsed = (Get-Date) - $startTime
-              if ($elapsed.TotalMinutes -gt $maxWait) {
-                Write-Host "  ❌ Upload timed out" -ForegroundColor Red
-                $allTestsPassed = $false
-                break
-              }
-            }
-          } catch {
-            Write-Host "  ⚠️  upload_to_adls.bat not found or failed: $($_.Exception.Message)" -ForegroundColor Yellow
-          }
+          # Check if run_tests notebook exists
+          Write-Host "`n📓 Looking for test notebook at: $runTestsNotebook"
           
-          # Step 2: Run DLT Pipeline
-          Write-Host "`n🚀 Step 2: Running DLT Pipeline..."
           try {
-            # Get pipeline ID
-            $pipelineList = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines" `
+            $notebookPath = [uri]::EscapeDataString($runTestsNotebook)
+            $notebookCheck = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/get-status?path=$notebookPath" `
               -Headers $headers `
               -Method Get
             
-            $pipeline = $pipelineList.statuses | Where-Object { $_.name -eq $pipelineName } | Select-Object -First 1
+            Write-Host "  ✅ Found test notebook"
             
-            if (-not $pipeline) {
-              Write-Host "  ⚠️  DLT Pipeline '$pipelineName' not found. Skipping DLT run." -ForegroundColor Yellow
-            } else {
-              $pipelineId = $pipeline.pipeline_id
-              Write-Host "  📋 Pipeline ID: $pipelineId"
-              
-              # Start pipeline update
-              $updateBody = @{
-                pipeline_id = $pipelineId
-                full_refresh = $false
-              } | ConvertTo-Json
-              
-              $updateResult = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines/$pipelineId/updates" `
-                -Headers $headers `
-                -Method Post `
-                -Body $updateBody
-              
-              $updateId = $updateResult.update_id
-              Write-Host "  ✅ Pipeline update started (Update ID: $updateId)"
-              
-              # Wait for pipeline completion
-              $maxWaitPipeline = 60
-              $startTimePipeline = Get-Date
-              $pipelineCompleted = $false
-              
-              while (-not $pipelineCompleted) {
-                Start-Sleep -Seconds 15
-                
-                $updateStatus = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/pipelines/$pipelineId/updates/$updateId" `
-                  -Headers $headers `
-                  -Method Get
-                
-                $pipelineState = $updateStatus.update.state
-                Write-Host "  ⏳ Pipeline state: $pipelineState"
-                
-                if ($pipelineState -in @("COMPLETED", "FAILED", "CANCELED")) {
-                  $pipelineCompleted = $true
-                  if ($pipelineState -ne "COMPLETED") {
-                    Write-Host "  ❌ Pipeline failed with state: $pipelineState" -ForegroundColor Red
-                    $allTestsPassed = $false
-                    continue
-                  }
-                  Write-Host "  ✅ Pipeline completed successfully"
-                }
-                
-                $elapsedPipeline = (Get-Date) - $startTimePipeline
-                if ($elapsedPipeline.TotalMinutes -gt $maxWaitPipeline) {
-                  Write-Host "  ❌ Pipeline execution timed out" -ForegroundColor Red
-                  $allTestsPassed = $false
-                  break
-                }
-              }
-            }
           } catch {
-            Write-Host "  ❌ DLT Pipeline execution failed: $($_.Exception.Message)" -ForegroundColor Red
-            $allTestsPassed = $false
+            Write-Host "  ⚠️  run_tests notebook not found at $runTestsNotebook" -ForegroundColor Yellow
+            Write-Host "  Skipping tests for $pipelineName"
+            $testResults += @{
+              Pipeline = $pipelineName
+              Status = "SKIPPED"
+            }
+            continue
           }
           
-          # Step 3: Run test cases
-          Write-Host "`n🧪 Step 3: Running test cases..."
+          # Run the test notebook
+          Write-Host "`n🚀 Running tests for $pipelineName..."
+          
           try {
-            $testsPath = "$testBasePath/tests"
-            
-            # Create test runner notebook - using array of lines
-            $testRunnerLines = @(
-              '# Databricks notebook source',
-              'import subprocess',
-              'import sys',
-              'import os',
-              '',
-              'print("=" * 60)',
-              "print(`"Running Test Cases for $pipelineName`")",
-              'print("=" * 60)',
-              '',
-              'subprocess.check_call([sys.executable, "-m", "pip", "install", "pytest", "pytest-html", "--quiet"])',
-              '',
-              "test_path = `"/Workspace/Shared/Tests/$pipelineName/tests`"",
-              'result = subprocess.run(',
-              '    ["python", "-m", "pytest", test_path, "-v", "--tb=short", "--maxfail=1"],',
-              '    capture_output=True,',
-              '    text=True',
-              ')',
-              '',
-              'print(result.stdout)',
-              'print(result.stderr)',
-              '',
-              'if result.returncode != 0:',
-              "    raise Exception(`"Tests failed for $pipelineName`")",
-              '',
-              "print(`"All tests passed for $pipelineName`")"
-            )
-            $testRunner = $testRunnerLines -join "`n"
-            
-            $b64TestContent = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($testRunner))
-            
-            $testUploadBody = @{
-              path      = "$testBasePath/temp_test_runner"
-              content   = $b64TestContent
-              language  = "PYTHON"
-              overwrite = $true
-              format    = "SOURCE"
-            } | ConvertTo-Json
-            
-            Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.0/workspace/import" `
-              -Headers $headers `
-              -Method Post `
-              -Body $testUploadBody | Out-Null
-            
-            # Run test job
             $testJobBody = @{
-              run_name = "Tests_${pipelineName}_${{ parameters.environment }}"
+              run_name = "Tests_${pipelineName}_${{ parameters.environment }}_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
               tasks = @(
                 @{
                   task_key = "run_tests"
                   notebook_task = @{
-                    notebook_path = "$testBasePath/temp_test_runner"
+                    notebook_path = $runTestsNotebook
                   }
                   new_cluster = @{
                     spark_version = "13.3.x-scala2.12"
@@ -351,24 +112,29 @@ steps:
             
             $testRunId = $testRun.run_id
             Write-Host "  ✅ Test job submitted (Run ID: $testRunId)"
+            Write-Host "  📍 Job URL: ${{ parameters.databricksHost }}/#job/$testRunId"
             
             # Wait for test completion
-            $maxWaitTest = 30
+            $maxWaitTest = 60
             $startTimeTest = Get-Date
             $testCompleted = $false
             
             while (-not $testCompleted) {
-              Start-Sleep -Seconds 10
+              Start-Sleep -Seconds 15
               
               $testStatus = Invoke-RestMethod "${{ parameters.databricksHost }}/api/2.1/jobs/runs/get?run_id=$testRunId" `
                 -Headers $headers `
                 -Method Get
               
               $testState = $testStatus.state.life_cycle_state
+              $resultState = if ($testStatus.state.result_state) { $testStatus.state.result_state } else { "RUNNING" }
+              
+              Write-Host "  ⏳ Status: $testState | Result: $resultState"
               
               if ($testState -eq "TERMINATED") {
                 $testCompleted = $true
-                if ($testStatus.state.result_state -ne "SUCCESS") {
+                
+                if ($resultState -ne "SUCCESS") {
                   Write-Host "  ❌ Tests failed!" -ForegroundColor Red
                   
                   # Try to get error details
@@ -380,41 +146,49 @@ steps:
                     if ($output.error) {
                       Write-Host "  Error: $($output.error)" -ForegroundColor Red
                     }
+                    if ($output.metadata -and $output.metadata.state -and $output.metadata.state.state_message) {
+                      Write-Host "  Message: $($output.metadata.state.state_message)" -ForegroundColor Red
+                    }
                   } catch {
-                    Write-Host "  Could not retrieve test output"
+                    Write-Host "  Could not retrieve detailed error information"
                   }
                   
                   $allTestsPassed = $false
                   $testResults += @{
                     Pipeline = $pipelineName
                     Status = "FAILED"
+                    RunId = $testRunId
                   }
-                  continue
-                }
-                Write-Host "  ✅ All tests passed!"
-                $testResults += @{
-                  Pipeline = $pipelineName
-                  Status = "PASSED"
+                } else {
+                  Write-Host "  ✅ All tests passed!" -ForegroundColor Green
+                  $testResults += @{
+                    Pipeline = $pipelineName
+                    Status = "PASSED"
+                    RunId = $testRunId
+                  }
                 }
               }
               
               $elapsedTest = (Get-Date) - $startTimeTest
               if ($elapsedTest.TotalMinutes -gt $maxWaitTest) {
-                Write-Host "  ❌ Test execution timed out" -ForegroundColor Red
+                Write-Host "  ❌ Test execution timed out after $maxWaitTest minutes" -ForegroundColor Red
                 $allTestsPassed = $false
                 $testResults += @{
                   Pipeline = $pipelineName
                   Status = "TIMEOUT"
+                  RunId = $testRunId
                 }
                 break
               }
             }
+            
           } catch {
             Write-Host "  ❌ Test execution failed: $($_.Exception.Message)" -ForegroundColor Red
             $allTestsPassed = $false
             $testResults += @{
               Pipeline = $pipelineName
               Status = "ERROR"
+              Error = $_.Exception.Message
             }
           }
         }
@@ -424,10 +198,28 @@ steps:
         Write-Host "  TEST EXECUTION SUMMARY - ${{ parameters.environment }}"
         Write-Host "============================================================"
         Write-Host "`nResults by Pipeline:"
+        
         foreach ($result in $testResults) {
-          $color = if ($result.Status -eq "PASSED") { "Green" } else { "Red" }
-          $icon = if ($result.Status -eq "PASSED") { "✅" } else { "❌" }
-          Write-Host "  $icon $($result.Pipeline): $($result.Status)" -ForegroundColor $color
+          $icon = switch ($result.Status) {
+            "PASSED" { "✅"; break }
+            "FAILED" { "❌"; break }
+            "TIMEOUT" { "⏱️"; break }
+            "SKIPPED" { "⏭️"; break }
+            "ERROR" { "❌"; break }
+            default { "❓" }
+          }
+          
+          $color = if ($result.Status -eq "PASSED") { "Green" } elseif ($result.Status -eq "SKIPPED") { "Yellow" } else { "Red" }
+          
+          $message = "  $icon $($result.Pipeline): $($result.Status)"
+          if ($result.RunId) {
+            $message += " (Run ID: $($result.RunId))"
+          }
+          if ($result.Error) {
+            $message += " - $($result.Error)"
+          }
+          
+          Write-Host $message -ForegroundColor $color
         }
         
         Write-Host "`n============================================================"
