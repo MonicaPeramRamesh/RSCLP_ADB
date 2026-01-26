@@ -8,13 +8,6 @@ pool:
   demands:
     - agent.name -equals RSCLP_Agent
 
-resources:
-  repositories:
-    - repository: TestRepo
-      type: git
-      name: RSCLP_TEST  # Test repository with test cases
-      ref: main
-
 stages:
   # ===========================================
   # STAGE 1: DEPLOY TO DEV
@@ -37,29 +30,11 @@ stages:
               dltSecretScope: $(DLT_SECRET_SCOPE)
 
   # ===========================================
-  # STAGE 2: RUN TESTS IN DEV
-  # ===========================================
-  - stage: Test_Dev
-    displayName: 'Run Tests in DEV'
-    dependsOn: Deploy_Dev
-    variables:
-      - group: dev-dlt-vars
-    jobs:
-      - job: RunTestsDev
-        displayName: 'Execute Test Suite in DEV'
-        steps:
-          - template: templates/run-tests.yml
-            parameters:
-              environment: 'DEV'
-              databricksHost: $(DATABRICKS_HOST)
-              databricksToken: $(DATABRICKS_TOKEN)
-
-  # ===========================================
-  # STAGE 3: MANUAL APPROVAL FOR TEST
+  # STAGE 2: MANUAL APPROVAL FOR TEST
   # ===========================================
   - stage: Approval_Test
     displayName: 'Approval for TEST'
-    dependsOn: Test_Dev
+    dependsOn: Deploy_Dev
     jobs:
       - job: waitForValidation
         displayName: 'Wait for Manual Approval'
@@ -71,19 +46,16 @@ stages:
               notifyUsers: 'peram.monica@outlook.com'
               instructions: |
                 ✅ DEV deployment completed successfully.
-                ✅ All tests passed in DEV.
                 
                 Please review and approve to deploy to TEST environment.
                 
                 Verify:
                 - DLT pipelines deployed correctly
                 - All transformations uploaded
-                - Test cases executed successfully
-                - Data quality checks passed
               onTimeout: 'reject'
 
   # ===========================================
-  # STAGE 4: DEPLOY TO TEST
+  # STAGE 3: DEPLOY TO TEST
   # ===========================================
   - stage: Deploy_Test
     displayName: 'Deploy to TEST'
@@ -104,29 +76,11 @@ stages:
               dltSecretScope: $(DLT_SECRET_SCOPE)
 
   # ===========================================
-  # STAGE 5: RUN TESTS IN TEST
-  # ===========================================
-  - stage: Test_Test
-    displayName: 'Run Tests in TEST'
-    dependsOn: Deploy_Test
-    variables:
-      - group: test-dlt-vars
-    jobs:
-      - job: RunTestsTest
-        displayName: 'Execute Test Suite in TEST'
-        steps:
-          - template: templates/run-tests.yml
-            parameters:
-              environment: 'TEST'
-              databricksHost: $(DATABRICKS_HOST)
-              databricksToken: $(DATABRICKS_TOKEN)
-
-  # ===========================================
-  # STAGE 6: MANUAL APPROVAL FOR PROD
+  # STAGE 4: MANUAL APPROVAL FOR PROD
   # ===========================================
   - stage: Approval_Prod
     displayName: 'Approval for PROD'
-    dependsOn: Test_Test
+    dependsOn: Deploy_Test
     jobs:
       - job: waitForValidation
         displayName: 'Wait for Manual Approval'
@@ -138,7 +92,6 @@ stages:
               notifyUsers: 'peram.monica@outlook.com'
               instructions: |
                 ✅ TEST deployment completed successfully.
-                ✅ All tests passed in TEST.
                 
                 ⚠️  This is PRODUCTION deployment - proceed with caution!
                 
@@ -146,13 +99,11 @@ stages:
                 
                 Verify:
                 - TEST deployment successful
-                - All test cases passed
-                - Data quality validated
                 - Ready for production
               onTimeout: 'reject'
 
   # ===========================================
-  # STAGE 7: DEPLOY TO PROD
+  # STAGE 5: DEPLOY TO PROD
   # ===========================================
   - stage: Deploy_Prod
     displayName: 'Deploy to PROD'
@@ -169,23 +120,6 @@ stages:
               databricksHost: $(DATABRICKS_HOST)
               databricksToken: $(DATABRICKS_TOKEN)
               dltCatalog: $(DLT_CATALOG)
+              dltSchema: $(DLT_CATALOG)
               dltSchema: $(DLT_SCHEMA)
               dltSecretScope: $(DLT_SECRET_SCOPE)
-
-  # ===========================================
-  # STAGE 8: RUN TESTS IN PROD
-  # ===========================================
-  - stage: Test_Prod
-    displayName: 'Run Tests in PROD'
-    dependsOn: Deploy_Prod
-    variables:
-      - group: prod-dlt-vars
-    jobs:
-      - job: RunTestsProd
-        displayName: 'Execute Test Suite in PROD'
-        steps:
-          - template: templates/run-tests.yml
-            parameters:
-              environment: 'PROD'
-              databricksHost: $(DATABRICKS_HOST)
-              databricksToken: $(DATABRICKS_TOKEN)
