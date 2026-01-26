@@ -120,6 +120,5 @@ stages:
               databricksHost: $(DATABRICKS_HOST)
               databricksToken: $(DATABRICKS_TOKEN)
               dltCatalog: $(DLT_CATALOG)
-              dltSchema: $(DLT_CATALOG)
               dltSchema: $(DLT_SCHEMA)
               dltSecretScope: $(DLT_SECRET_SCOPE)
