@@ -60,7 +60,7 @@ steps:
           Write-Host "🧪 Testing Pipeline: $pipelineName"
           Write-Host "============================================================"
           
-          $runTestsNotebook = "/Workspace/Shared/Tests/pipelines/$pipelineName/utils/run_tests"
+          $runTestsNotebook = "/Workspace/Shared/Tests/pipelines/$pipelineName/utils/run_tests.ipynb"
           
           # Check if run_tests notebook exists
           Write-Host "`n📓 Looking for test notebook at: $runTestsNotebook"
